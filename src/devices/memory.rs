@@ -46,13 +46,17 @@ static RE_SWAP_FREE: Lazy<Regex> = lazy_regex!(r"SwapFree:\s*(\d*) kB");
 
 static RE_NUM_MEMORY_DEVICES: Lazy<Regex> = lazy_regex!(r"MEMORY_ARRAY_NUM_DEVICES=(\d*)");
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MemoryData {
     pub total_mem: usize,
     pub available_mem: usize,
     pub total_swap: usize,
     pub free_swap: usize,
+    pub swap_devices: Vec<SwapDevice>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwapDevice {}
 
 impl MemoryData {
     pub fn new() -> Result<Self> {
@@ -130,11 +134,18 @@ impl MemoryData {
             available_mem,
             total_swap,
             free_swap,
+            swap_devices: SwapDevice::get_all().unwrap_or_default(),
         };
 
         trace!("Gathered memory data: {memory_data:?}");
 
         Ok(memory_data)
+    }
+}
+
+impl SwapDevice {
+    pub fn get_all() -> Result<Vec<Self>> {
+        Ok(vec![])
     }
 }
 

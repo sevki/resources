@@ -302,6 +302,7 @@ impl ResMemory {
             available_mem,
             total_swap,
             free_swap,
+            ..
         } = memdata;
 
         let used_mem = total_mem.saturating_sub(available_mem);
