@@ -27,6 +27,18 @@
                     <property name="valign">start</property>
                     <property name="vexpand">true</property>
                     <child>
+                      <object class="AdwPreferencesGroup" id="options">
+                        <property name="title" translatable="yes">Options</property>
+                        <child>
+                          <object class="AdwSwitchRow" id="separate_swap_graphs">
+                            <property name="subtitle-selectable">true</property>
+                            <property name="title" translatable="yes">Show swap devices</property>
+                            <property name="active">false</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
                       <object class="AdwPreferencesGroup">
                         <property name="title" translatable="yes">Usage</property>
                         <child>
@@ -35,6 +47,12 @@
                         <child>
                           <object class="ResGraphBox" id="swap"/>
                         </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwPreferencesGroup" id="swap_devices">
+                        <property name="title" translatable="yes">Swap Devices</property>
+                        <property name="visible">false</property>
                       </object>
                     </child>
                     <child>

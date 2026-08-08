@@ -44,6 +44,8 @@ static RE_SWAP_TOTAL: Lazy<Regex> = lazy_regex!(r"SwapTotal:\s*(\d*) kB");
 
 static RE_SWAP_FREE: Lazy<Regex> = lazy_regex!(r"SwapFree:\s*(\d*) kB");
 
+static RE_PROC_SWAPS_LINE: Lazy<Regex> = lazy_regex!(r"^(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(-?\d+)$");
+
 static RE_NUM_MEMORY_DEVICES: Lazy<Regex> = lazy_regex!(r"MEMORY_ARRAY_NUM_DEVICES=(\d*)");
 
 #[derive(Debug, Clone)]
@@ -56,7 +58,13 @@ pub struct MemoryData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwapDevice {}
+pub struct SwapDevice {
+    pub name: String,
+    pub r#type: String,
+    pub size: usize,
+    pub used: usize,
+    pub priority: i32,
+}
 
 impl MemoryData {
     pub fn new() -> Result<Self> {
@@ -145,7 +153,67 @@ impl MemoryData {
 
 impl SwapDevice {
     pub fn get_all() -> Result<Vec<Self>> {
-        Ok(vec![])
+        trace!("Reading /proc/swaps…");
+        let swaps_content = read_parsed::<String>("/proc/swaps")?;
+        let mut devices = Vec::new();
+
+        for line in swaps_content.lines().skip(1) {
+            if let Some(captures) = RE_PROC_SWAPS_LINE.captures(line) {
+                let name = captures[1].to_string();
+                let r#type = captures[2].to_string();
+                let size = captures[3].parse::<usize>()? * 1024;
+                let used = captures[4].parse::<usize>()? * 1024;
+                let priority = captures[5].parse::<i32>()?;
+
+                devices.push(Self {
+                    name,
+                    r#type,
+                    size,
+                    used,
+                    priority,
+                });
+            }
+        }
+
+        Ok(devices)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proc_swaps() {
+        let content = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
+                       /dev/dm-0                               partition\t15624188\t0\t-1\n\
+                       /dev/zram0                              partition\t7782396\t664\t100\n";
+
+        let mut devices = Vec::new();
+        for line in content.lines().skip(1) {
+            if let Some(captures) = RE_PROC_SWAPS_LINE.captures(line) {
+                let name = captures[1].to_string();
+                let r#type = captures[2].to_string();
+                let size = captures[3].parse::<usize>().unwrap() * 1024;
+                let used = captures[4].parse::<usize>().unwrap() * 1024;
+                let priority = captures[5].parse::<i32>().unwrap();
+
+                devices.push(SwapDevice {
+                    name,
+                    r#type,
+                    size,
+                    used,
+                    priority,
+                });
+            }
+        }
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name, "/dev/dm-0");
+        assert_eq!(devices[0].priority, -1);
+        assert_eq!(devices[1].name, "/dev/zram0");
+        assert_eq!(devices[1].used, 664 * 1024);
+        assert_eq!(devices[1].priority, 100);
     }
 }
 

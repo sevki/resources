@@ -4,6 +4,7 @@ use log::trace;
 
 use crate::config::DEVLOPMENT_BUILD;
 use crate::devices::memory::{MemoryData, MemoryDevice};
+use crate::ui::widgets::graph_box::ResGraphBox;
 use crate::ui::widgets::stack_sidebar_item::UsageLabels;
 use crate::utils::i18n::{i18n, i18n_f};
 use crate::utils::units::{convert_fraction, convert_storage};
@@ -31,6 +32,14 @@ mod imp {
         pub memory: TemplateChild<ResGraphBox>,
         #[template_child]
         pub swap: TemplateChild<ResGraphBox>,
+        #[template_child]
+        pub options: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub separate_swap_graphs: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub swap_devices: TemplateChild<adw::PreferencesGroup>,
+
+        pub swap_graphs: RefCell<Vec<ResGraphBox>>,
         #[template_child]
         pub authentication_banner: TemplateChild<adw::Banner>,
         #[template_child]
@@ -91,6 +100,10 @@ mod imp {
             Self {
                 memory: Default::default(),
                 swap: Default::default(),
+                options: Default::default(),
+                separate_swap_graphs: Default::default(),
+                swap_devices: Default::default(),
+                swap_graphs: Default::default(),
                 authentication_banner: Default::default(),
                 properties: Default::default(),
                 slots_used: Default::default(),
@@ -302,7 +315,7 @@ impl ResMemory {
             available_mem,
             total_swap,
             free_swap,
-            ..
+            swap_devices,
         } = memdata;
 
         let used_mem = total_mem.saturating_sub(available_mem);
@@ -311,8 +324,60 @@ impl ResMemory {
         imp.memory
             .add_storage_point(Some(used_mem as u64), Some(total_mem as u64));
 
-        imp.swap
-            .add_storage_point(Some(used_swap as u64), Some(total_swap as u64));
+        let has_swap = total_swap > 0;
+        let is_separate = imp.separate_swap_graphs.is_active();
+
+        imp.swap.set_visible(has_swap && !is_separate);
+        imp.options.set_visible(has_swap && swap_devices.len() > 1);
+
+        if has_swap && !is_separate {
+            imp.swap
+                .add_storage_point(Some(used_swap as u64), Some(total_swap as u64));
+        }
+
+        if !has_swap || swap_devices.is_empty() || !is_separate {
+            imp.swap_devices.set_visible(false);
+        } else {
+            imp.swap_devices.set_visible(true);
+
+            let mut swap_graphs = imp.swap_graphs.borrow_mut();
+
+            let reconfigured = swap_graphs.len() != swap_devices.len()
+                || !swap_devices
+                    .iter()
+                    .zip(swap_graphs.iter())
+                    .all(|(dev, graph)| graph.imp().title_label.label() == dev.name.as_str());
+
+            if reconfigured {
+                for graph in swap_graphs.iter() {
+                    imp.swap_devices.remove(graph);
+                }
+                swap_graphs.clear();
+
+                for device in &swap_devices {
+                    let graph_box = ResGraphBox::new();
+                    graph_box.set_title_label(&device.name);
+                    graph_box.graph().set_graph_color(0x94, 0x29, 0x7c);
+
+                    imp.swap_devices.add(&graph_box);
+                    swap_graphs.push(graph_box);
+                }
+            }
+
+            for (device, graph_box) in swap_devices.iter().zip(swap_graphs.iter()) {
+                graph_box.add_storage_point(Some(device.used as u64), Some(device.size as u64));
+                graph_box.set_subtitle(&i18n_f(
+                    // Translators: 1st is used swap, 2nd is total swap, 3rd is type, 4th is priority
+                    "{} / {} · {} · Priority: {}",
+                    &[
+                        &convert_storage(device.used as f64, false),
+                        &convert_storage(device.size as f64, false),
+                        &device.r#type,
+                        &device.priority.to_string(),
+                    ],
+                ));
+            }
+        }
 
         let memory_fraction = used_mem as f64 / total_mem as f64;
 
