@@ -1,15 +1,54 @@
+use core::cell::Ref;
+
 use adw::{prelude::*, subclass::prelude::*};
 use gtk::glib::{self, clone};
 use log::trace;
 
 use crate::config::DEVLOPMENT_BUILD;
-use crate::devices::memory::{MemoryData, MemoryDevice};
+use crate::devices::memory::{MemoryData, MemoryDevice, SwapDevice};
 use crate::ui::widgets::graph_box::ResGraphBox;
 use crate::ui::widgets::stack_sidebar_item::UsageLabels;
 use crate::utils::i18n::{i18n, i18n_f};
 use crate::utils::units::{convert_fraction, convert_storage};
 
 pub const TAB_ID: &str = "memory";
+
+struct PerDevice<'a> {
+    devices: &'a [SwapDevice],
+    show_options: bool,
+}
+
+enum SwapUiState<'a> {
+    Hidden,
+    Combined {
+        used_swap: u64,
+        total_swap: u64,
+        show_options: bool,
+    },
+
+    PerDevice(PerDevice<'a>),
+}
+// enum SwapRefreshUiState<'b> {
+enum SwapRefreshUiState {
+    RefreshRequired,
+    None,
+}
+
+impl<'a> PerDevice<'a> {
+    fn refresh_required(&self, swap_graphs: Ref<Vec<ResGraphBox>>) -> SwapRefreshUiState {
+        let reconfigured = swap_graphs.len() != self.devices.len()
+            || !self
+                .devices
+                .iter()
+                .zip(swap_graphs.iter())
+                .all(|(dev, graph)| graph.imp().title_label.label() == dev.name.as_str());
+        if reconfigured {
+            SwapRefreshUiState::RefreshRequired
+        } else {
+            SwapRefreshUiState::None
+        }
+    }
+}
 
 mod imp {
     use std::cell::{Cell, RefCell};
@@ -324,58 +363,71 @@ impl ResMemory {
         imp.memory
             .add_storage_point(Some(used_mem as u64), Some(total_mem as u64));
 
-        let has_swap = total_swap > 0;
-        let is_separate = imp.separate_swap_graphs.is_active();
+        let swap_state = Self::swap_ui_state(
+            total_swap,
+            used_swap,
+            imp.separate_swap_graphs.is_active(),
+            &swap_devices,
+        );
 
-        imp.swap.set_visible(has_swap && !is_separate);
-        imp.options.set_visible(has_swap && swap_devices.len() > 1);
-
-        if has_swap && !is_separate {
-            imp.swap
-                .add_storage_point(Some(used_swap as u64), Some(total_swap as u64));
-        }
-
-        if !has_swap || swap_devices.is_empty() || !is_separate {
-            imp.swap_devices.set_visible(false);
-        } else {
-            imp.swap_devices.set_visible(true);
-
-            let mut swap_graphs = imp.swap_graphs.borrow_mut();
-
-            let reconfigured = swap_graphs.len() != swap_devices.len()
-                || !swap_devices
-                    .iter()
-                    .zip(swap_graphs.iter())
-                    .all(|(dev, graph)| graph.imp().title_label.label() == dev.name.as_str());
-
-            if reconfigured {
-                for graph in swap_graphs.iter() {
-                    imp.swap_devices.remove(graph);
-                }
-                swap_graphs.clear();
-
-                for device in &swap_devices {
-                    let graph_box = ResGraphBox::new();
-                    graph_box.set_title_label(&device.name);
-                    graph_box.graph().set_graph_color(0x94, 0x29, 0x7c);
-
-                    imp.swap_devices.add(&graph_box);
-                    swap_graphs.push(graph_box);
-                }
+        match swap_state {
+            SwapUiState::Hidden => {
+                imp.swap.set_visible(false);
+                imp.swap_devices.set_visible(false);
+                imp.options.set_visible(false);
             }
+            SwapUiState::Combined {
+                used_swap,
+                total_swap,
+                show_options,
+            } => {
+                imp.swap.set_visible(true);
+                imp.swap_devices.set_visible(false);
+                imp.options.set_visible(show_options);
+                imp.swap
+                    .add_storage_point(Some(used_swap), Some(total_swap));
+            }
+            SwapUiState::PerDevice(per_device) => {
+                imp.swap.set_visible(false);
+                imp.swap_devices.set_visible(true);
+                imp.options.set_visible(per_device.show_options);
 
-            for (device, graph_box) in swap_devices.iter().zip(swap_graphs.iter()) {
-                graph_box.add_storage_point(Some(device.used as u64), Some(device.size as u64));
-                graph_box.set_subtitle(&i18n_f(
-                    // Translators: 1st is used swap, 2nd is total swap, 3rd is type, 4th is priority
-                    "{} / {} · {} · Priority: {}",
-                    &[
-                        &convert_storage(device.used as f64, false),
-                        &convert_storage(device.size as f64, false),
-                        &device.r#type,
-                        &device.priority.to_string(),
-                    ],
-                ));
+                match per_device.refresh_required(imp.swap_graphs.borrow()) {
+                    SwapRefreshUiState::RefreshRequired => {
+                        let mut swap_graphs = imp.swap_graphs.borrow_mut();
+                        for graph in swap_graphs.iter() {
+                            imp.swap_devices.remove(graph);
+                        }
+                        swap_graphs.clear();
+
+                        for device in per_device.devices {
+                            let graph_box = ResGraphBox::new();
+                            graph_box.set_title_label(&device.name);
+                            graph_box.graph().set_graph_color(0x94, 0x29, 0x7c);
+
+                            imp.swap_devices.add(&graph_box);
+                            swap_graphs.push(graph_box);
+                        }
+                    }
+
+                    SwapRefreshUiState::None => {}
+                }
+
+                let mut swap_graphs = imp.swap_graphs.borrow_mut();
+
+                for (device, graph_box) in per_device.devices.iter().zip(swap_graphs.iter()) {
+                    graph_box.add_storage_point(Some(device.used as u64), Some(device.size as u64));
+                    graph_box.set_subtitle(&i18n_f(
+                        // Translators: 1st is used swap, 2nd is total swap, 3rd is type, 4th is priority
+                        "{} / {} · {} · Priority: {}",
+                        &[
+                            &convert_storage(device.used as f64, false),
+                            &convert_storage(device.size as f64, false),
+                            &device.r#type,
+                            &device.priority.to_string(),
+                        ],
+                    ));
+                }
             }
         }
 
@@ -420,5 +472,32 @@ impl ResMemory {
         );
 
         self.set_property("usage", memory_fraction);
+    }
+
+    fn swap_ui_state(
+        total_swap: usize,
+        used_swap: usize,
+        is_separate: bool,
+        swap_devices: &[SwapDevice],
+    ) -> SwapUiState<'_> {
+        let has_swap = total_swap > 0;
+        let has_multiple_devices = swap_devices.len() > 1;
+
+        if !has_swap || swap_devices.is_empty() {
+            return SwapUiState::Hidden;
+        }
+
+        if is_separate {
+            SwapUiState::PerDevice(PerDevice {
+                devices: swap_devices,
+                show_options: has_multiple_devices,
+            })
+        } else {
+            SwapUiState::Combined {
+                used_swap: used_swap as u64,
+                total_swap: total_swap as u64,
+                show_options: has_multiple_devices,
+            }
+        }
     }
 }
