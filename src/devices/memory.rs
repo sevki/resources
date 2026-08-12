@@ -40,10 +40,6 @@ static RE_MEM_TOTAL: Lazy<Regex> = lazy_regex!(r"MemTotal:\s*(\d*) kB");
 
 static RE_MEM_AVAILABLE: Lazy<Regex> = lazy_regex!(r"MemAvailable:\s*(\d*) kB");
 
-static RE_SWAP_TOTAL: Lazy<Regex> = lazy_regex!(r"SwapTotal:\s*(\d*) kB");
-
-static RE_SWAP_FREE: Lazy<Regex> = lazy_regex!(r"SwapFree:\s*(\d*) kB");
-
 static RE_PROC_SWAPS_LINE: Lazy<Regex> = lazy_regex!(r"^(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(-?\d+)$");
 
 static RE_NUM_MEMORY_DEVICES: Lazy<Regex> = lazy_regex!(r"MEMORY_ARRAY_NUM_DEVICES=(\d*)");
@@ -52,8 +48,6 @@ static RE_NUM_MEMORY_DEVICES: Lazy<Regex> = lazy_regex!(r"MEMORY_ARRAY_NUM_DEVIC
 pub struct MemoryData {
     pub total_mem: usize,
     pub available_mem: usize,
-    pub total_swap: usize,
-    pub free_swap: usize,
     pub swap_devices: Vec<SwapDevice>,
 }
 
@@ -105,43 +99,9 @@ impl MemoryData {
                     })
             })?;
 
-        let total_swap = RE_SWAP_TOTAL
-            .captures(&proc_mem)
-            .context("RE_SWAP_TOTAL no captures")
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .context("RE_SWAP_TOTAL not enough captures")
-                    .and_then(|capture| {
-                        capture
-                            .as_str()
-                            .parse::<usize>()
-                            .context("unable to parse SwapTotal")
-                            .map(|int| int.saturating_mul(1024))
-                    })
-            })?;
-
-        let free_swap = RE_SWAP_FREE
-            .captures(&proc_mem)
-            .context("RE_SWAP_FREE no captures")
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .context("RE_SWAP_FREE not enough captures")
-                    .and_then(|capture| {
-                        capture
-                            .as_str()
-                            .parse::<usize>()
-                            .context("unable to parse SwapFree")
-                            .map(|int| int.saturating_mul(1024))
-                    })
-            })?;
-
         let memory_data = Self {
             total_mem,
             available_mem,
-            total_swap,
-            free_swap,
             swap_devices: SwapDevice::get_all().unwrap_or_default(),
         };
 
