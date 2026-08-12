@@ -1,6 +1,7 @@
 use adw::{prelude::*, subclass::prelude::*};
 use gtk::glib::{self, clone};
 use log::trace;
+use std::num::NonZeroU64;
 
 use crate::config::DEVLOPMENT_BUILD;
 use crate::devices::memory::{MemoryData, MemoryDevice, SwapDevice};
@@ -14,9 +15,30 @@ pub const TAB_ID: &str = "memory";
 const INACTIVE_SWAP_GRAPH_RETENTION_TICKS: u64 = 600;
 
 struct PerDevice {
-    used_swap: u64,
-    total_swap: u64,
+    usage: Option<SwapUsage>,
     show_options: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SwapUsage {
+    used: u64,
+    total: NonZeroU64,
+}
+
+impl SwapUsage {
+    fn from_devices(swap_devices: &[SwapDevice]) -> Option<Self> {
+        let used = swap_devices.iter().map(|device| device.used as u64).sum();
+        let total = swap_devices
+            .iter()
+            .map(|device| device.size as u64)
+            .sum::<u64>();
+
+        NonZeroU64::new(total).map(|total| Self { used, total })
+    }
+
+    fn fraction(self) -> f64 {
+        self.used as f64 / self.total.get() as f64
+    }
 }
 
 pub struct SwapGraphEntry {
@@ -30,8 +52,7 @@ pub struct SwapGraphEntry {
 enum SwapUiState {
     Hidden,
     Combined {
-        used_swap: u64,
-        total_swap: u64,
+        usage: Option<SwapUsage>,
         show_options: bool,
     },
 
@@ -361,54 +382,39 @@ impl ResMemory {
         let swap_state = Self::swap_ui_state(imp.separate_swap_graphs.is_active(), &swap_devices);
         self.update_swap_device_graphs(&swap_devices);
 
-        if !swap_devices.is_empty() {
-            let used_swap: u64 = swap_devices.iter().map(|device| device.used as u64).sum();
-            let total_swap: u64 = swap_devices.iter().map(|device| device.size as u64).sum();
+        if let Some(swap_usage) = swap_state.usage() {
             imp.swap
-                .add_storage_point(Some(used_swap), Some(total_swap));
+                .add_storage_point(Some(swap_usage.used), Some(swap_usage.total.get()));
         }
 
         let mut usage_labels = UsageLabels::default();
-        let memory_fraction = used_mem as f64 / total_mem as f64;
+        let memory_fraction = Self::fraction_or_zero(used_mem as u64, total_mem as u64);
         usage_labels.add_with_icon(
             "speedometer-symbolic",
             i18n("Memory Usage"),
             convert_fraction(memory_fraction, true),
         );
 
-        match swap_state {
+        match &swap_state {
             SwapUiState::Hidden => {
                 imp.swap.set_visible(false);
                 imp.swap_devices.set_visible(false);
                 imp.options.set_visible(false);
             }
             SwapUiState::Combined {
-                used_swap,
-                total_swap,
+                usage,
                 show_options,
             } => {
                 imp.swap.set_visible(true);
                 imp.swap_devices.set_visible(false);
-                imp.options.set_visible(show_options);
-                usage_labels.add_with_icon(
-                    "swap-symbolic",
-                    i18n("Swap Usage"),
-                    convert_fraction(used_swap as f64 / total_swap as f64, true),
-                )
+                imp.options.set_visible(*show_options);
+                Self::add_swap_usage_label(&mut usage_labels, *usage);
             }
             SwapUiState::PerDevice(per_device) => {
                 imp.swap.set_visible(false);
                 imp.swap_devices.set_visible(true);
                 imp.options.set_visible(per_device.show_options);
-
-                usage_labels.add_with_icon(
-                    "swap-symbolic",
-                    i18n("Swap Usage"),
-                    convert_fraction(
-                        per_device.used_swap as f64 / per_device.total_swap as f64,
-                        true,
-                    ),
-                )
+                Self::add_swap_usage_label(&mut usage_labels, per_device.usage);
             }
         }
 
@@ -448,6 +454,22 @@ impl ResMemory {
                 &device.priority.to_string(),
             ],
         ));
+    }
+
+    fn add_swap_usage_label(usage_labels: &mut UsageLabels, usage: Option<SwapUsage>) {
+        if let Some(swap_usage) = usage {
+            usage_labels.add_with_icon(
+                "swap-symbolic",
+                i18n("Swap Usage"),
+                convert_fraction(swap_usage.fraction(), true),
+            );
+        }
+    }
+
+    fn fraction_or_zero(used: u64, total: u64) -> f64 {
+        NonZeroU64::new(total)
+            .map(|total| used as f64 / total.get() as f64)
+            .unwrap_or(0.0)
     }
 
     fn update_swap_device_graphs(&self, swap_devices: &[SwapDevice]) {
@@ -520,25 +542,32 @@ impl ResMemory {
 
     fn swap_ui_state(is_separate: bool, swap_devices: &[SwapDevice]) -> SwapUiState {
         let has_multiple_devices = swap_devices.len() > 1;
+        let usage = SwapUsage::from_devices(swap_devices);
 
         if swap_devices.is_empty() {
             return SwapUiState::Hidden;
         }
 
-        let used_swap: usize = swap_devices.iter().map(|device| device.used).sum();
-        let total_swap: usize = swap_devices.iter().map(|device| device.size).sum();
         if is_separate {
             SwapUiState::PerDevice(PerDevice {
+                usage,
                 show_options: has_multiple_devices,
-                used_swap: used_swap as u64,
-                total_swap: total_swap as u64,
             })
         } else {
             SwapUiState::Combined {
-                used_swap: used_swap as u64,
-                total_swap: total_swap as u64,
+                usage,
                 show_options: has_multiple_devices,
             }
+        }
+    }
+}
+
+impl SwapUiState {
+    fn usage(&self) -> Option<SwapUsage> {
+        match self {
+            Self::Hidden => None,
+            Self::Combined { usage, .. } => *usage,
+            Self::PerDevice(per_device) => per_device.usage,
         }
     }
 }
