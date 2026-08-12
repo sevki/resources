@@ -175,6 +175,10 @@
       <default>false</default>
       <summary>Display logical CPU graphs in Processor view</summary>
     </key>
+    <key name="memory-show-swap-devices" type="b">
+      <default>false</default>
+      <summary>Display swap usage split by device in Memory view</summary>
+    </key>
     <key name="show-graph-grids" type="b">
       <default>false</default>
       <summary>Show grids in graphs</summary>

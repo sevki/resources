@@ -363,6 +363,7 @@ impl Settings {
         processes_show_swap,
         processes_show_combined_memory,
         processes_show_commandline,
+        memory_show_swap_devices,
         show_logical_cpus,
         show_graph_grids,
         normalize_cpu_usage,
