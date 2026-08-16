@@ -379,13 +379,21 @@ impl ResMemory {
         imp.memory
             .add_storage_point(Some(used_mem as u64), Some(total_mem as u64));
 
-        let swap_state = Self::swap_ui_state(imp.separate_swap_graphs.is_active(), &swap_devices);
-        self.update_swap_device_graphs(&swap_devices);
+        let combined_usage = SwapUsage::from_devices(&swap_devices);
+        let swap_state = Self::swap_ui_state(
+            imp.separate_swap_graphs.is_active(),
+            &swap_devices,
+            combined_usage,
+        );
 
-        if let Some(swap_usage) = swap_state.usage() {
-            imp.swap
-                .add_storage_point(Some(swap_usage.used), Some(swap_usage.total.get()));
-        }
+        // Always advance both data series; visibility is controlled by swap_state below.
+        match combined_usage {
+            Some(usage) => imp
+                .swap
+                .add_storage_point(Some(usage.used), Some(usage.total.get())),
+            None => imp.swap.add_storage_point(None, None),
+        };
+        self.update_swap_device_graphs(&swap_devices);
 
         let mut usage_labels = UsageLabels::default();
         let memory_fraction = Self::fraction_or_zero(used_mem as u64, total_mem as u64);
@@ -540,9 +548,12 @@ impl ResMemory {
         }
     }
 
-    fn swap_ui_state(is_separate: bool, swap_devices: &[SwapDevice]) -> SwapUiState {
+    fn swap_ui_state(
+        is_separate: bool,
+        swap_devices: &[SwapDevice],
+        usage: Option<SwapUsage>,
+    ) -> SwapUiState {
         let has_multiple_devices = swap_devices.len() > 1;
-        let usage = SwapUsage::from_devices(swap_devices);
 
         if swap_devices.is_empty() {
             return SwapUiState::Hidden;
@@ -558,16 +569,6 @@ impl ResMemory {
                 usage,
                 show_options: has_multiple_devices,
             }
-        }
-    }
-}
-
-impl SwapUiState {
-    fn usage(&self) -> Option<SwapUsage> {
-        match self {
-            Self::Hidden => None,
-            Self::Combined { usage, .. } => *usage,
-            Self::PerDevice(per_device) => per_device.usage,
         }
     }
 }
