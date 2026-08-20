@@ -4,6 +4,7 @@ use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::{debug, trace, warn};
 use std::{
     collections::HashMap,
+    fmt,
     path::{Path, PathBuf},
     sync::LazyLock,
 };
@@ -11,9 +12,10 @@ use std::{
 use crate::utils::read_parsed;
 
 const PROC_STAT: &str = "/proc/stat";
+const CPUINFO_AVG_FREQ: &str = "cpuinfo_avg_freq";
+const SCALING_CUR_FREQ: &str = "scaling_cur_freq";
 
 const KNOWN_HWMONS: &[&str] = &["zenpower", "coretemp", "k10temp", "ibmpowernv"];
-
 const KNOWN_THERMAL_ZONES: &[&str] = &["cpu-thermal", "x86_pkg_temp", "acpitz"];
 
 static RE_LSCPU_MODEL_NAME: Lazy<Regex> = lazy_regex!(r"Model name:\s*(.*)");
@@ -34,14 +36,86 @@ static RE_PROC_STAT: Lazy<Regex> = lazy_regex!(
     r"cpu\d+ *(?P<user>\d*) *(?P<nice>\d*) *(?P<system>\d*) *(?P<idle>\d*) *(?P<iowait>\d*) *(?P<irq>\d*) *(?P<softirq>\d*) *(?P<steal>\d*) *(?P<guest>\d*) *(?P<guest_nice>\d*)"
 );
 
-static CPU_TEMPERATURE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-    search_for_hwmons(KNOWN_HWMONS)
-        .or_else(|| search_for_thermal_zones(KNOWN_THERMAL_ZONES))
-        .or_else(|| {
-            warn!("No CPU temperature sensor found!");
-            None
-        })
-});
+#[derive(Debug, Clone)]
+enum CpuTemperatureSource {
+    Hwmon(PathBuf),
+    ThermalZone(PathBuf),
+}
+
+impl CpuTemperatureSource {
+    fn discover() -> Option<Self> {
+        search_for_hwmons(KNOWN_HWMONS)
+            .map(Self::Hwmon)
+            .or_else(|| search_for_thermal_zones(KNOWN_THERMAL_ZONES).map(Self::ThermalZone))
+            .or_else(|| {
+                warn!("No CPU temperature sensor found!");
+                None
+            })
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Hwmon(path) | Self::ThermalZone(path) => path,
+        }
+    }
+
+    fn read(&self) -> Result<f32> {
+        read_sysfs_thermal(self.path())
+    }
+}
+
+impl fmt::Display for CpuTemperatureSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hwmon(path) => write!(f, "hwmon at {}", path.display()),
+            Self::ThermalZone(path) => write!(f, "thermal zone at {}", path.display()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CpuFrequencySource {
+    CpuInfoAvgFreq(PathBuf),
+    ScalingCurFreq(PathBuf),
+}
+
+impl CpuFrequencySource {
+    fn candidates(core: usize) -> [Self; 2] {
+        [
+            Self::CpuInfoAvgFreq(PathBuf::from(format!(
+                "/sys/devices/system/cpu/cpu{core}/cpufreq/{CPUINFO_AVG_FREQ}"
+            ))),
+            Self::ScalingCurFreq(PathBuf::from(format!(
+                "/sys/devices/system/cpu/cpu{core}/cpufreq/{SCALING_CUR_FREQ}"
+            ))),
+        ]
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::CpuInfoAvgFreq(path) | Self::ScalingCurFreq(path) => path,
+        }
+    }
+
+    fn read(&self, core: usize) -> Result<u64> {
+        read_parsed::<u64>(self.path())
+            .with_context(|| format!("unable to read {self} for core {core}"))
+            .map(|freq| freq * 1000)
+            .inspect(|freq| trace!("Frequency of core {core}: {freq} Hz ({self})"))
+    }
+}
+
+impl fmt::Display for CpuFrequencySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CpuInfoAvgFreq(path) => write!(f, "{CPUINFO_AVG_FREQ} at {}", path.display()),
+            Self::ScalingCurFreq(path) => write!(f, "{SCALING_CUR_FREQ} at {}", path.display()),
+        }
+    }
+}
+
+static CPU_TEMPERATURE_SOURCE: LazyLock<Option<CpuTemperatureSource>> =
+    LazyLock::new(CpuTemperatureSource::discover);
 
 fn search_for_cpu_temp<S: AsRef<str>>(base_path: S) -> Option<PathBuf> {
     let base = base_path.as_ref();
@@ -267,19 +341,22 @@ impl CpuInfo {
 /// of the corresponding file in sysfs
 pub fn get_cpu_freq(core: usize) -> Result<u64> {
     trace!("Finding CPU frequency for core {core}…");
+    let mut last_error = None;
+    for source in CpuFrequencySource::candidates(core) {
+        match source.read(core) {
+            Ok(freq) => {
+                debug!("CPU frequency source selected for core {core}: {source}");
+                return Ok(freq);
+            }
+            Err(err) => {
+                trace!("Unable to read CPU frequency from {source} for core {core}: {err:#}");
 
-    read_parsed::<u64>(format!(
-        "/sys/devices/system/cpu/cpu{core}/cpufreq/cpuinfo_avg_freq"
-    ))
-    .or_else(|_| {
-        read_parsed::<u64>(format!(
-            "/sys/devices/system/cpu/cpu{core}/cpufreq/scaling_cur_freq"
-        ))
-    })
-    .map(|x| x * 1000)
-    .inspect(|freq| trace!("Frequency of core {core}: {freq} Hz"))
+                last_error = Some(err);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("unable to read CPU frequency for core {core}")))
 }
-
 fn parse_proc_stat_line<S: AsRef<str>>(line: S) -> Result<(u64, u64)> {
     let captures = RE_PROC_STAT
         .captures(line.as_ref())
@@ -343,8 +420,9 @@ pub fn get_cpu_usage() -> Vec<Result<(u64, u64)>> {
 ///
 /// Will return `Err` if there was no way to read the CPU temperature.
 pub fn get_temperature() -> Result<f32> {
-    if let Some(path) = CPU_TEMPERATURE_PATH.as_ref() {
-        read_sysfs_thermal(path)
+    if let Some(source) = CPU_TEMPERATURE_SOURCE.as_ref() {
+        debug!("CPU temperature source selected: {source}");
+        source.read()
     } else {
         bail!("no CPU temperature sensor found")
     }
@@ -362,7 +440,7 @@ fn read_sysfs_thermal<P: AsRef<Path>>(path: P) -> Result<f32> {
 mod test {
     use pretty_assertions::assert_eq;
 
-    use crate::devices::cpu::CpuInfo;
+    use crate::devices::cpu::{CpuFrequencySource, CpuInfo};
 
     const LSCPU_OUTPUT: &str = concat!(
         "Architecture:             x86_64\n",
@@ -411,5 +489,13 @@ mod test {
         };
 
         assert_eq!(parsed, expected)
+    }
+
+    #[test]
+    fn cpu_frequency_sources_are_ordered_with_fallback() {
+        let sources = CpuFrequencySource::candidates(3);
+
+        assert!(matches!(sources[0], CpuFrequencySource::CpuInfoAvgFreq(_)));
+        assert!(matches!(sources[1], CpuFrequencySource::ScalingCurFreq(_)));
     }
 }
