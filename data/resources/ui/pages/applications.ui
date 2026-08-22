@@ -1,51 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface>
-  <menu id="end_app_menu">
-    <section>
-      <item>
-        <attribute name="label" translatable="yes">Kill App</attribute>
-        <attribute name="action">applications.kill-app</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Halt App</attribute>
-        <attribute name="action">applications.halt-app</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Continue App</attribute>
-        <attribute name="action">applications.continue-app</attribute>
-      </item>
-    </section>
-  </menu>
-  <menu id="app_context_menu">
-    <section>
-      <item>
-        <attribute name="label" translatable="yes">End App</attribute>
-        <attribute name="action">applications.context-end-app</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Kill App</attribute>
-        <attribute name="action">applications.context-kill-app</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Halt App</attribute>
-        <attribute name="action">applications.context-halt-app</attribute>
-      </item>
-      <item>
-        <attribute name="label" translatable="yes">Continue App</attribute>
-        <attribute name="action">applications.context-continue-app</attribute>
-      </item>
-    </section>
-    <section>
-      <item>
-        <attribute name="label" translatable="yes">Information</attribute>
-        <attribute name="action">applications.context-information</attribute>
-      </item>
-    </section>
-  </menu>
   <template class="ResApplications" parent="AdwBin">
     <object class="GtkPopoverMenu" id="popover_menu">
       <property name="name">popover_menu</property>
-      <property name="menu-model">app_context_menu</property>
       <property name="has-arrow">false</property>
       <property name="halign">start</property>
     </object>
@@ -75,6 +32,7 @@
         </property>
         <property name="reveal-bottom-bars">false</property>
         <child type="bottom">
+          <!-- Bottom action buttons: info + end/split button -->
           <object class="GtkBox">
             <property name="margin-top">16</property>
             <property name="margin-bottom">16</property>
@@ -99,7 +57,6 @@
             <child>
               <object class="AdwSplitButton" id="end_application_button">
                 <property name="label" translatable="yes">End App</property>
-                <property name="menu-model">end_app_menu</property>
                 <property name="sensitive">false</property>
                 <style>
                   <class name="destructive-action"/>

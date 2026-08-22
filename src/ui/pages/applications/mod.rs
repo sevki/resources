@@ -15,7 +15,7 @@ use gtk::{
 
 use crate::add_column;
 use crate::config::DEVLOPMENT_BUILD;
-use crate::devices::app::AppsContext;
+use crate::devices::app::{AppActionMode, AppsContext};
 use crate::devices::process::ProcessAction;
 use crate::ui::dialogs::app_dialog::ResAppDialog;
 use crate::ui::pages::{MAX_PERCENTAGE_LENGTH, MAX_SPEED_LENGTH, MAX_STORAGE_LENGTH};
@@ -30,6 +30,28 @@ use self::application_entry::ApplicationEntry;
 use self::application_name_cell::ResApplicationNameCell;
 
 pub const TAB_ID: &str = "applications";
+
+// AppActionMode is defined and owned by devices/app.rs.
+// The view reads it from ApplicationEntry::action_mode() — it does not recompute it.
+fn action_mode_from_entry(entry: &ApplicationEntry) -> AppActionMode {
+    entry.action_mode()
+}
+
+enum UiAppCommand {
+    Information,
+    Process(ProcessAction),
+}
+
+fn parse_ui_command(target: &str) -> Option<UiAppCommand> {
+    match target {
+        "information" => Some(UiAppCommand::Information),
+        "end" => Some(UiAppCommand::Process(ProcessAction::TERM)),
+        "kill" => Some(UiAppCommand::Process(ProcessAction::KILL)),
+        "halt" => Some(UiAppCommand::Process(ProcessAction::STOP)),
+        "continue" => Some(UiAppCommand::Process(ProcessAction::CONT)),
+        _ => None,
+    }
+}
 
 mod imp {
     use std::{
@@ -158,95 +180,44 @@ mod imp {
 
         fn class_init(klass: &mut Self::Class) {
             klass.install_action(
-                "applications.context-end-app",
-                None,
-                move |res_applications, _, _| {
+                "applications.context-run",
+                Some(glib::VariantTy::STRING),
+                move |res_applications, _, target| {
+                    let Some(target) = target.and_then(|variant| variant.str()) else {
+                        return;
+                    };
+                    let Some(command) = parse_ui_command(target) else {
+                        return;
+                    };
+
                     if let Some(application_entry) =
                         res_applications.imp().popped_over_app.borrow().as_ref()
                     {
-                        res_applications
-                            .open_app_action_dialog(application_entry, ProcessAction::TERM);
+                        match command {
+                            UiAppCommand::Information => {
+                                res_applications.open_info_dialog(application_entry)
+                            }
+                            UiAppCommand::Process(action) => {
+                                res_applications.open_app_action_dialog(application_entry, action)
+                            }
+                        }
                     }
                 },
             );
 
             klass.install_action(
-                "applications.context-kill-app",
-                None,
-                move |res_applications, _, _| {
-                    if let Some(application_entry) =
-                        res_applications.imp().popped_over_app.borrow().as_ref()
-                    {
-                        res_applications
-                            .open_app_action_dialog(application_entry, ProcessAction::KILL);
-                    }
-                },
-            );
+                "applications.selection-run",
+                Some(glib::VariantTy::STRING),
+                move |res_applications, _, target| {
+                    let Some(target) = target.and_then(|variant| variant.str()) else {
+                        return;
+                    };
+                    let Some(UiAppCommand::Process(action)) = parse_ui_command(target) else {
+                        return;
+                    };
 
-            klass.install_action(
-                "applications.context-halt-app",
-                None,
-                move |res_applications, _, _| {
-                    if let Some(application_entry) =
-                        res_applications.imp().popped_over_app.borrow().as_ref()
-                    {
-                        res_applications
-                            .open_app_action_dialog(application_entry, ProcessAction::STOP);
-                    }
-                },
-            );
-
-            klass.install_action(
-                "applications.context-continue-app",
-                None,
-                move |res_applications, _, _| {
-                    if let Some(application_entry) =
-                        res_applications.imp().popped_over_app.borrow().as_ref()
-                    {
-                        res_applications
-                            .open_app_action_dialog(application_entry, ProcessAction::CONT);
-                    }
-                },
-            );
-
-            klass.install_action(
-                "applications.context-information",
-                None,
-                move |res_applications, _, _| {
-                    if let Some(application_entry) =
-                        res_applications.imp().popped_over_app.borrow().as_ref()
-                    {
-                        res_applications.open_info_dialog(application_entry);
-                    }
-                },
-            );
-
-            klass.install_action(
-                "applications.kill-app",
-                None,
-                move |res_applications, _, _| {
                     if let Some(app) = res_applications.get_selected_app_entry() {
-                        res_applications.open_app_action_dialog(&app, ProcessAction::KILL);
-                    }
-                },
-            );
-
-            klass.install_action(
-                "applications.halt-app",
-                None,
-                move |res_applications, _, _| {
-                    if let Some(app) = res_applications.get_selected_app_entry() {
-                        res_applications.open_app_action_dialog(&app, ProcessAction::STOP);
-                    }
-                },
-            );
-
-            klass.install_action(
-                "applications.continue-app",
-                None,
-                move |res_applications, _, _| {
-                    if let Some(app) = res_applications.get_selected_app_entry() {
-                        res_applications.open_app_action_dialog(&app, ProcessAction::CONT);
+                        res_applications.open_app_action_dialog(&app, action);
                     }
                 },
             );
@@ -254,7 +225,6 @@ mod imp {
             Self::bind_template(klass);
         }
 
-        // You must call `Widget`'s `init_template()` within `instance_init()`.
         fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
             obj.init_template();
         }
@@ -320,8 +290,94 @@ impl ResApplications {
         let imp = self.imp();
         imp.sender.set(sender).unwrap();
 
+        // HJIGKIO Step 0 (most-initial render setup): build and attach widgets/models before any user interaction.
         self.setup_widgets();
         self.setup_signals();
+        self.apply_selected_action_mode(AppActionMode::NoSelection);
+        self.apply_context_action_mode(AppActionMode::NoSelection);
+    }
+
+    fn menu_item(label: String, action: &str, target: &str) -> gio::MenuItem {
+        let item = gio::MenuItem::new(Some(&label), None::<&str>);
+        item.set_action_and_target_value(Some(action), Some(&glib::Variant::from(target)));
+        item
+    }
+
+    fn build_context_menu_model(action_mode: AppActionMode) -> gio::Menu {
+        let menu = gio::Menu::new();
+
+        let process_section = gio::Menu::new();
+        if action_mode.allows(ProcessAction::TERM) {
+            process_section.append_item(&Self::menu_item(
+                i18n("End App"),
+                "applications.context-run",
+                "end",
+            ));
+        }
+        if action_mode.allows(ProcessAction::KILL) {
+            process_section.append_item(&Self::menu_item(
+                i18n("Kill App"),
+                "applications.context-run",
+                "kill",
+            ));
+        }
+        if action_mode.allows(ProcessAction::STOP) {
+            process_section.append_item(&Self::menu_item(
+                i18n("Halt App"),
+                "applications.context-run",
+                "halt",
+            ));
+        }
+        if action_mode.allows(ProcessAction::CONT) {
+            process_section.append_item(&Self::menu_item(
+                i18n("Continue App"),
+                "applications.context-run",
+                "continue",
+            ));
+        }
+        if process_section.n_items() > 0 {
+            menu.append_section(None, &process_section);
+        }
+
+        if action_mode.show_information() {
+            let info_section = gio::Menu::new();
+            info_section.append_item(&Self::menu_item(
+                i18n("Information"),
+                "applications.context-run",
+                "information",
+            ));
+            menu.append_section(None, &info_section);
+        }
+
+        menu
+    }
+
+    fn build_selection_menu_model(action_mode: AppActionMode) -> gio::Menu {
+        let menu = gio::Menu::new();
+
+        if action_mode.allows(ProcessAction::KILL) {
+            menu.append_item(&Self::menu_item(
+                i18n("Kill App"),
+                "applications.selection-run",
+                "kill",
+            ));
+        }
+        if action_mode.allows(ProcessAction::STOP) {
+            menu.append_item(&Self::menu_item(
+                i18n("Halt App"),
+                "applications.selection-run",
+                "halt",
+            ));
+        }
+        if action_mode.allows(ProcessAction::CONT) {
+            menu.append_item(&Self::menu_item(
+                i18n("Continue App"),
+                "applications.selection-run",
+                "continue",
+            ));
+        }
+
+        menu
     }
 
     fn add_gestures(&self, item: &ListItem) {
@@ -341,7 +397,10 @@ impl ResApplications {
                     let imp = this.imp();
                     let popover_menu = &imp.popover_menu;
 
+                    let action_mode = action_mode_from_entry(&entry);
+
                     *imp.popped_over_app.borrow_mut() = Some(entry);
+                    this.apply_context_action_mode(action_mode);
 
                     let position = widget
                         .compute_point(&this, &gtk::graphene::Point::new(x as _, y as _))
@@ -601,24 +660,21 @@ impl ResApplications {
         imp.selection_model
             .borrow()
             .connect_selection_changed(clone!(
+                #[weak(rename_to = this)]
+                self,
                 #[weak]
                 imp,
                 move |model, _, _| {
                     imp.toolbar_view
                         .set_reveal_bottom_bars(model.selected_item().is_some());
 
-                    let is_system_processes = model.selected_item().is_some_and(|object| {
-                        object
-                            .downcast::<ApplicationEntry>()
-                            .unwrap()
-                            .id()
-                            .is_none()
-                    });
+                    let action_mode = model
+                        .selected_item()
+                        .and_then(|object| object.downcast::<ApplicationEntry>().ok())
+                        .map(|entry| action_mode_from_entry(&entry))
+                        .unwrap_or_default();
 
-                    imp.information_button
-                        .set_sensitive(model.selected() != u32::MAX);
-                    imp.end_application_button
-                        .set_sensitive(model.selected() != u32::MAX && !is_system_processes);
+                    this.apply_selected_action_mode(action_mode);
                 }
             ));
 
@@ -763,6 +819,35 @@ impl ResApplications {
             .and_then(|object| object.downcast::<ApplicationEntry>().ok())
     }
 
+    fn apply_selected_action_mode(&self, action_mode: AppActionMode) {
+        let imp = self.imp();
+
+        imp.information_button
+            .set_sensitive(action_mode.show_information());
+        imp.end_application_button
+            .set_sensitive(action_mode.allows(ProcessAction::TERM));
+
+        let selection_menu = Self::build_selection_menu_model(action_mode);
+        imp.end_application_button
+            .set_menu_model(Some(&selection_menu));
+
+        self.action_set_enabled(
+            "applications.selection-run",
+            action_mode.show_action_dropdown(),
+        );
+    }
+
+    fn apply_context_action_mode(&self, action_mode: AppActionMode) {
+        let imp = self.imp();
+        let context_menu = Self::build_context_menu_model(action_mode);
+        imp.popover_menu.set_menu_model(Some(&context_menu));
+
+        self.action_set_enabled(
+            "applications.context-run",
+            action_mode.show_information() || action_mode.show_action_dropdown(),
+        );
+    }
+
     pub fn refresh_apps_list(&self, apps_context: &AppsContext) {
         let imp = self.imp();
 
@@ -841,7 +926,18 @@ impl ResApplications {
             imp.toolbar_view.set_reveal_bottom_bars(false);
             imp.information_button.set_sensitive(false);
             imp.end_application_button.set_sensitive(false);
+            self.apply_selected_action_mode(AppActionMode::NoSelection);
         }
+
+        // Keep context menu state derived from the currently popped-over row.
+        // Selection can be empty while a context menu is open.
+        let context_action_mode = imp
+            .popped_over_app
+            .borrow()
+            .as_ref()
+            .map(action_mode_from_entry)
+            .unwrap_or_default();
+        self.apply_context_action_mode(context_action_mode);
 
         // -1 because we don't want to count System Processes
         self.set_tab_usage_labels(UsageLabels::single_without_icon(i18n_f(
@@ -851,14 +947,22 @@ impl ResApplications {
     }
 
     pub fn open_app_action_dialog(&self, app: &ApplicationEntry, action: ProcessAction) {
+        if !action_mode_from_entry(app).allows(action) {
+            return;
+        }
+
+        let Some(app_id) = app.id().as_ref().map(std::string::ToString::to_string) else {
+            return;
+        };
+
         // Nothing too bad can happen on Continue so dont show the dialog
         if action == ProcessAction::CONT {
             let main_context = MainContext::default();
             main_context.spawn_local(clone!(
                 #[weak(rename_to = this)]
                 self,
-                #[weak]
-                app,
+                #[strong]
+                app_id,
                 async move {
                     let imp = this.imp();
                     let _ = imp
@@ -867,7 +971,7 @@ impl ResApplications {
                         .unwrap()
                         .send(Action::ManipulateApp(
                             action,
-                            app.id().unwrap().to_string(),
+                            app_id,
                             imp.toast_overlay.get(),
                         ))
                         .await;
@@ -895,8 +999,8 @@ impl ResApplications {
             clone!(
                 #[weak(rename_to = this)]
                 self,
-                #[weak]
-                app,
+                #[strong]
+                app_id,
                 move |_, response| {
                     if response == "yes" {
                         let main_context = MainContext::default();
@@ -904,7 +1008,7 @@ impl ResApplications {
                             #[weak]
                             this,
                             #[strong]
-                            app,
+                            app_id,
                             async move {
                                 let imp = this.imp();
                                 let _ = imp
@@ -913,7 +1017,7 @@ impl ResApplications {
                                     .unwrap()
                                     .send(Action::ManipulateApp(
                                         action,
-                                        app.id().unwrap().to_string(),
+                                        app_id,
                                         imp.toast_overlay.get(),
                                     ))
                                     .await;

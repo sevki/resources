@@ -173,6 +173,43 @@ enum AppAssociation {
     Pending(DeferredAppFuture),
 }
 
+/// Defines what actions a given application row supports in the UI.
+/// Produced by the business layer; the view consumes it without re-deriving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppActionMode {
+    /// No row is selected.
+    #[default]
+    NoSelection,
+    /// Row is present but only the information dialog may be shown
+    /// (e.g. the "System Processes" group entry).
+    InformationOnly,
+    /// Normal application: all process-management actions are available.
+    Full,
+}
+
+impl AppActionMode {
+    pub fn allows(self, action: ProcessAction) -> bool {
+        match self {
+            Self::Full => matches!(
+                action,
+                ProcessAction::TERM
+                    | ProcessAction::KILL
+                    | ProcessAction::STOP
+                    | ProcessAction::CONT
+            ),
+            Self::NoSelection | Self::InformationOnly => false,
+        }
+    }
+
+    pub fn show_information(self) -> bool {
+        matches!(self, Self::InformationOnly | Self::Full)
+    }
+
+    pub fn show_action_dropdown(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AppsContext {
     apps: HashMap<Option<String>, App>,
@@ -195,6 +232,7 @@ pub struct App {
     pub read_bytes_from_dead_processes: u64,
     pub write_bytes_from_dead_processes: u64,
     pub containerization: Containerization,
+    pub is_system_processes_entry: bool,
 }
 
 /// Parsed key-value data from a .desktop file, produced by a parser strategy.
@@ -251,6 +289,7 @@ impl App {
             read_bytes_from_dead_processes: 0,
             write_bytes_from_dead_processes: 0,
             containerization: Containerization::None,
+            is_system_processes_entry: true,
         });
 
         apps
@@ -467,6 +506,7 @@ impl App {
             read_bytes_from_dead_processes: 0,
             write_bytes_from_dead_processes: 0,
             containerization,
+            is_system_processes_entry: false,
         })
     }
 
@@ -485,6 +525,17 @@ impl App {
     #[must_use]
     pub const fn is_running(&self) -> bool {
         !self.processes.is_empty()
+    }
+
+    /// Returns the action mode for this app as understood by the view layer.
+    /// The view must use this value; it must not re-derive mode from raw fields.
+    #[must_use]
+    pub fn action_mode(&self) -> AppActionMode {
+        if self.is_system_processes_entry || self.id.is_none() {
+            AppActionMode::InformationOnly
+        } else {
+            AppActionMode::Full
+        }
     }
 
     pub fn processes_iter<'a>(

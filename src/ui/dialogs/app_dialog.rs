@@ -1,4 +1,5 @@
 use crate::config::DEVLOPMENT_BUILD;
+use crate::devices::app::AppActionMode;
 use crate::ui::pages::applications::application_entry::ApplicationEntry;
 use crate::utils::i18n::i18n;
 use crate::utils::units::{convert_fraction, convert_speed, convert_storage};
@@ -116,7 +117,7 @@ impl ResAppDialog {
 
         let imp = self.imp();
 
-        if app.id().is_none() // this will be the case for System Processes
+        if app.action_mode() == AppActionMode::InformationOnly
             || app
                 .icon()
                 .downcast_ref::<ThemedIcon>()
