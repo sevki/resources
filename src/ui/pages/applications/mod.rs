@@ -37,14 +37,22 @@ fn action_mode_from_entry(entry: &ApplicationEntry) -> AppActionMode {
     entry.action_mode()
 }
 
+struct InformationCommand;
+
 enum UiAppCommand {
-    Information,
+    Information(InformationCommand),
     Process(ProcessAction),
+}
+
+impl InformationCommand {
+    fn open_info_dialog(&self, res_applications: &ResApplications, app: &ApplicationEntry) {
+        res_applications.open_info_dialog(app);
+    }
 }
 
 fn parse_ui_command(target: &str) -> Option<UiAppCommand> {
     match target {
-        "information" => Some(UiAppCommand::Information),
+        "information" => Some(UiAppCommand::Information(InformationCommand)),
         "end" => Some(UiAppCommand::Process(ProcessAction::TERM)),
         "kill" => Some(UiAppCommand::Process(ProcessAction::KILL)),
         "halt" => Some(UiAppCommand::Process(ProcessAction::STOP)),
@@ -194,8 +202,8 @@ mod imp {
                         res_applications.imp().popped_over_app.borrow().as_ref()
                     {
                         match command {
-                            UiAppCommand::Information => {
-                                res_applications.open_info_dialog(application_entry)
+                            UiAppCommand::Information(info) => {
+                                info.open_info_dialog(res_applications, application_entry)
                             }
                             UiAppCommand::Process(action) => {
                                 res_applications.open_app_action_dialog(application_entry, action)
