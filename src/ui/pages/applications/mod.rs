@@ -39,9 +39,16 @@ fn action_mode_from_entry(entry: &ApplicationEntry) -> AppActionMode {
 
 struct InformationCommand;
 
+enum ProcessCommand {
+    End,
+    Kill,
+    Halt,
+    Continue,
+}
+
 enum UiAppCommand {
     Information(InformationCommand),
-    Process(ProcessAction),
+    Process(ProcessCommand),
 }
 
 impl InformationCommand {
@@ -50,13 +57,38 @@ impl InformationCommand {
     }
 }
 
+impl ProcessCommand {
+    fn action(&self) -> ProcessAction {
+        match self {
+            Self::End => ProcessAction::TERM,
+            Self::Kill => ProcessAction::KILL,
+            Self::Halt => ProcessAction::STOP,
+            Self::Continue => ProcessAction::CONT,
+        }
+    }
+
+    fn open_action_dialog_for_entry(
+        &self,
+        res_applications: &ResApplications,
+        app: &ApplicationEntry,
+    ) {
+        res_applications.open_app_action_dialog(app, self.action());
+    }
+
+    fn open_action_dialog_for_selection(&self, res_applications: &ResApplications) {
+        if let Some(app) = res_applications.get_selected_app_entry() {
+            self.open_action_dialog_for_entry(res_applications, &app);
+        }
+    }
+}
+
 fn parse_ui_command(target: &str) -> Option<UiAppCommand> {
     match target {
         "information" => Some(UiAppCommand::Information(InformationCommand)),
-        "end" => Some(UiAppCommand::Process(ProcessAction::TERM)),
-        "kill" => Some(UiAppCommand::Process(ProcessAction::KILL)),
-        "halt" => Some(UiAppCommand::Process(ProcessAction::STOP)),
-        "continue" => Some(UiAppCommand::Process(ProcessAction::CONT)),
+        "end" => Some(UiAppCommand::Process(ProcessCommand::End)),
+        "kill" => Some(UiAppCommand::Process(ProcessCommand::Kill)),
+        "halt" => Some(UiAppCommand::Process(ProcessCommand::Halt)),
+        "continue" => Some(UiAppCommand::Process(ProcessCommand::Continue)),
         _ => None,
     }
 }
@@ -205,9 +237,8 @@ mod imp {
                             UiAppCommand::Information(info) => {
                                 info.open_info_dialog(res_applications, application_entry)
                             }
-                            UiAppCommand::Process(action) => {
-                                res_applications.open_app_action_dialog(application_entry, action)
-                            }
+                            UiAppCommand::Process(process) => process
+                                .open_action_dialog_for_entry(res_applications, application_entry),
                         }
                     }
                 },
@@ -220,13 +251,11 @@ mod imp {
                     let Some(target) = target.and_then(|variant| variant.str()) else {
                         return;
                     };
-                    let Some(UiAppCommand::Process(action)) = parse_ui_command(target) else {
+                    let Some(UiAppCommand::Process(process)) = parse_ui_command(target) else {
                         return;
                     };
 
-                    if let Some(app) = res_applications.get_selected_app_entry() {
-                        res_applications.open_app_action_dialog(&app, action);
-                    }
+                    process.open_action_dialog_for_selection(res_applications);
                 },
             );
 
