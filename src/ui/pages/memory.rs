@@ -353,10 +353,30 @@ impl ResMemory {
             }
         ));
 
-        imp.separate_swap_graphs
-            .connect_active_notify(|switch_row| {
+        imp.separate_swap_graphs.connect_active_notify(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |switch_row| {
                 let _ = SETTINGS.set_memory_show_swap_devices(switch_row.is_active());
-            });
+                this.refresh_swap_ui_from_latest_data();
+            }
+        ));
+    }
+
+    fn refresh_swap_ui_from_latest_data(&self) {
+        let imp = self.imp();
+        let active_swap_devices = imp
+            .swap_graphs
+            .borrow()
+            .iter()
+            .filter(|entry| entry.active)
+            .count();
+        let swap_state = Self::swap_ui_state(
+            imp.separate_swap_graphs.is_active(),
+            active_swap_devices,
+            None,
+        );
+        self.apply_swap_ui_state(&swap_state, None);
     }
 
     pub fn refresh_page(&self, memdata: MemoryData) {
@@ -378,7 +398,7 @@ impl ResMemory {
         let combined_usage = SwapUsage::from_devices(&swap_devices);
         let swap_state = Self::swap_ui_state(
             imp.separate_swap_graphs.is_active(),
-            &swap_devices,
+            swap_devices.len(),
             combined_usage,
         );
 
@@ -399,25 +419,7 @@ impl ResMemory {
             convert_fraction(memory_fraction, true),
         );
 
-        match &swap_state {
-            SwapUiState::Hidden => {
-                imp.swap.set_visible(false);
-                imp.swap_devices.set_visible(false);
-                imp.options.set_visible(false);
-            }
-            SwapUiState::Combined(combined) => {
-                imp.swap.set_visible(true);
-                imp.swap_devices.set_visible(false);
-                imp.options.set_visible(combined.show_options);
-                Self::add_swap_usage_label(&mut usage_labels, combined.usage);
-            }
-            SwapUiState::PerDevice(per_device) => {
-                imp.swap.set_visible(false);
-                imp.swap_devices.set_visible(true);
-                imp.options.set_visible(per_device.show_options);
-                Self::add_swap_usage_label(&mut usage_labels, per_device.usage);
-            }
-        }
+        self.apply_swap_ui_state(&swap_state, Some(&mut usage_labels));
 
         let memory_devices = imp.memory_devices.borrow();
 
@@ -442,6 +444,39 @@ impl ResMemory {
         );
 
         self.set_property("usage", memory_fraction);
+    }
+
+    fn apply_swap_ui_state(
+        &self,
+        swap_state: &SwapUiState,
+        usage_labels: Option<&mut UsageLabels>,
+    ) {
+        let imp = self.imp();
+        let mut usage_labels = usage_labels;
+
+        match swap_state {
+            SwapUiState::Hidden => {
+                imp.swap.set_visible(false);
+                imp.swap_devices.set_visible(false);
+                imp.options.set_visible(false);
+            }
+            SwapUiState::Combined(combined) => {
+                imp.swap.set_visible(true);
+                imp.swap_devices.set_visible(false);
+                imp.options.set_visible(combined.show_options);
+                if let Some(labels) = usage_labels.as_deref_mut() {
+                    Self::add_swap_usage_label(labels, combined.usage);
+                }
+            }
+            SwapUiState::PerDevice(per_device) => {
+                imp.swap.set_visible(false);
+                imp.swap_devices.set_visible(true);
+                imp.options.set_visible(per_device.show_options);
+                if let Some(labels) = usage_labels.as_deref_mut() {
+                    Self::add_swap_usage_label(labels, per_device.usage);
+                }
+            }
+        }
     }
 
     fn update_swap_graph_subtitle(graph_box: &ResGraphBox, device: &SwapDevice) {
@@ -543,12 +578,12 @@ impl ResMemory {
 
     fn swap_ui_state(
         is_separate: bool,
-        swap_devices: &[SwapDevice],
+        swap_device_count: usize,
         usage: Option<SwapUsage>,
     ) -> SwapUiState {
-        let has_multiple_devices = swap_devices.len() > 1;
+        let has_multiple_devices = swap_device_count > 1;
 
-        if swap_devices.is_empty() {
+        if swap_device_count == 0 {
             return SwapUiState::Hidden;
         }
 
