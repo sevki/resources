@@ -32,7 +32,7 @@
                         <child>
                           <object class="AdwSwitchRow" id="separate_swap_graphs">
                             <property name="subtitle-selectable">true</property>
-                            <property name="title" translatable="yes">Show swap devices</property>
+                            <property name="title" translatable="yes">Show Swap Devices</property>
                             <property name="active">false</property>
                           </object>
                         </child>
