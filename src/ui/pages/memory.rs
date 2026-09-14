@@ -45,7 +45,14 @@ mod imp {
         pub memory_type: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub type_detail: TemplateChild<adw::ActionRow>,
-
+        #[template_child]
+        pub available_memory: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub free_memory: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub cached_memory: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub buffers_memory: TemplateChild<adw::ActionRow>,
         pub memory_devices: RefCell<Vec<MemoryDevice>>,
 
         #[property(get)]
@@ -93,6 +100,10 @@ mod imp {
                 swap: Default::default(),
                 authentication_banner: Default::default(),
                 properties: Default::default(),
+                available_memory: Default::default(),
+                free_memory: Default::default(),
+                cached_memory: Default::default(),
+                buffers_memory: Default::default(),
                 slots_used: Default::default(),
                 speed: Default::default(),
                 form_factor: Default::default(),
@@ -300,12 +311,26 @@ impl ResMemory {
         let MemoryData {
             total_mem,
             available_mem,
+            free_mem,
+            buffers_mem,
+            cached_mem,
             total_swap,
             free_swap,
         } = memdata;
 
         let used_mem = total_mem.saturating_sub(available_mem);
         let used_swap = total_swap.saturating_sub(free_swap);
+        imp.available_memory
+            .set_subtitle(&convert_storage(available_mem as f64, false));
+
+        imp.free_memory
+            .set_subtitle(&convert_storage(free_mem as f64, false));
+
+        imp.cached_memory
+            .set_subtitle(&convert_storage(cached_mem as f64, false));
+
+        imp.buffers_memory
+            .set_subtitle(&convert_storage(buffers_mem as f64, false));
 
         imp.memory
             .add_storage_point(Some(used_mem as u64), Some(total_mem as u64));

@@ -46,12 +46,48 @@ static RE_SWAP_FREE: Lazy<Regex> = lazy_regex!(r"SwapFree:\s*(\d*) kB");
 
 static RE_NUM_MEMORY_DEVICES: Lazy<Regex> = lazy_regex!(r"MEMORY_ARRAY_NUM_DEVICES=(\d*)");
 
+static RE_MEM_FREE: Lazy<Regex> = lazy_regex!(r"(?m)^MemFree:\s*(\d*) kB");
+
+static RE_BUFFERS: Lazy<Regex> = lazy_regex!(r"(?m)^Buffers:\s*(\d*) kB");
+
+static RE_CACHED: Lazy<Regex> = lazy_regex!(r"(?m)^Cached:\s*(\d*) kB");
+
+static RE_S_RECLAIMABLE: Lazy<Regex> = lazy_regex!(r"(?m)^SReclaimable:\s*(\d*) kB");
+
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryData {
     pub total_mem: usize,
     pub available_mem: usize,
+    pub free_mem: usize,
+    pub buffers_mem: usize,
+    pub cached_mem: usize,
     pub total_swap: usize,
     pub free_swap: usize,
+}
+
+fn parse_meminfo_bytes(proc_mem: &str, regex: &Regex, name: &str) -> Result<usize> {
+    parse_meminfo_bytes_optional(proc_mem, regex, name)?
+        .with_context(|| format!("{name} no captures"))
+}
+
+fn parse_meminfo_bytes_optional(
+    proc_mem: &str,
+    regex: &Regex,
+    name: &str,
+) -> Result<Option<usize>> {
+    let Some(captures) = regex.captures(proc_mem) else {
+        return Ok(None);
+    };
+
+    let value = captures
+        .get(1)
+        .with_context(|| format!("{name} not enough captures"))?
+        .as_str()
+        .parse::<usize>()
+        .with_context(|| format!("unable to parse {name}"))?
+        .saturating_mul(1024);
+
+    Ok(Some(value))
 }
 
 impl MemoryData {
@@ -59,75 +95,31 @@ impl MemoryData {
         trace!("Gathering memory data…");
 
         trace!("Reading {PROC_MEMINFO}…");
-        let proc_mem = read_parsed::<String>("/proc/meminfo")?;
+        let proc_mem = read_parsed::<String>(PROC_MEMINFO)?;
 
-        let total_mem = RE_MEM_TOTAL
-            .captures(&proc_mem)
-            .context("RE_MEM_TOTAL no captures")
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .context("RE_MEM_TOTAL not enough captures")
-                    .and_then(|capture| {
-                        capture
-                            .as_str()
-                            .parse::<usize>()
-                            .context("unable to parse MemTotal")
-                            .map(|int| int.saturating_mul(1024))
-                    })
-            })?;
+        let total_mem = parse_meminfo_bytes(&proc_mem, &RE_MEM_TOTAL, "MemTotal")?;
+        let available_mem = parse_meminfo_bytes(&proc_mem, &RE_MEM_AVAILABLE, "MemAvailable")?;
+        let free_mem = parse_meminfo_bytes(&proc_mem, &RE_MEM_FREE, "MemFree")?;
+        let buffers_mem = parse_meminfo_bytes(&proc_mem, &RE_BUFFERS, "Buffers")?;
 
-        let available_mem = RE_MEM_AVAILABLE
-            .captures(&proc_mem)
-            .context("RE_MEM_AVAILABLE no captures")
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .context("RE_MEM_AVAILABLE not enough captures")
-                    .and_then(|capture| {
-                        capture
-                            .as_str()
-                            .parse::<usize>()
-                            .context("unable to parse MemAvailable")
-                            .map(|int| int.saturating_mul(1024))
-                    })
-            })?;
+        let cached = parse_meminfo_bytes(&proc_mem, &RE_CACHED, "Cached")?;
 
-        let total_swap = RE_SWAP_TOTAL
-            .captures(&proc_mem)
-            .context("RE_SWAP_TOTAL no captures")
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .context("RE_SWAP_TOTAL not enough captures")
-                    .and_then(|capture| {
-                        capture
-                            .as_str()
-                            .parse::<usize>()
-                            .context("unable to parse SwapTotal")
-                            .map(|int| int.saturating_mul(1024))
-                    })
-            })?;
+        let s_reclaimable =
+            parse_meminfo_bytes_optional(&proc_mem, &RE_S_RECLAIMABLE, "SReclaimable")?
+                .unwrap_or(0);
 
-        let free_swap = RE_SWAP_FREE
-            .captures(&proc_mem)
-            .context("RE_SWAP_FREE no captures")
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .context("RE_SWAP_FREE not enough captures")
-                    .and_then(|capture| {
-                        capture
-                            .as_str()
-                            .parse::<usize>()
-                            .context("unable to parse SwapFree")
-                            .map(|int| int.saturating_mul(1024))
-                    })
-            })?;
+        // Include reclaimable slab memory in the displayed cache value.
+        let cached_mem = cached.saturating_add(s_reclaimable);
+
+        let total_swap = parse_meminfo_bytes(&proc_mem, &RE_SWAP_TOTAL, "SwapTotal")?;
+        let free_swap = parse_meminfo_bytes(&proc_mem, &RE_SWAP_FREE, "SwapFree")?;
 
         let memory_data = Self {
             total_mem,
             available_mem,
+            free_mem,
+            buffers_mem,
+            cached_mem,
             total_swap,
             free_swap,
         };

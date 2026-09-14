@@ -38,6 +38,47 @@
                       </object>
                     </child>
                     <child>
+                      <object class="AdwPreferencesGroup">
+                        <property name="title" translatable="yes">Details</property>
+                        <child>
+                          <object class="AdwActionRow" id="available_memory">
+                            <property name="title" translatable="yes">Available</property>
+                            <style>
+                              <class name="property"/>
+                            </style>
+                            <property name="subtitle-selectable">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwActionRow" id="free_memory">
+                            <property name="title" translatable="yes">Free</property>
+                            <style>
+                              <class name="property"/>
+                            </style>
+                            <property name="subtitle-selectable">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwActionRow" id="cached_memory">
+                            <property name="title" translatable="yes">Cache</property>
+                            <style>
+                              <class name="property"/>
+                            </style>
+                            <property name="subtitle-selectable">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwActionRow" id="buffers_memory">
+                            <property name="title" translatable="yes">Buffers</property>
+                            <style>
+                              <class name="property"/>
+                            </style>
+                            <property name="subtitle-selectable">true</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
                       <object class="AdwPreferencesGroup" id="properties">
                         <property name="title" translatable="yes">Properties</property>
                         <child>
