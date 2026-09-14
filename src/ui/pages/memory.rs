@@ -14,7 +14,7 @@ use crate::utils::units::{convert_fraction, convert_storage};
 pub const TAB_ID: &str = "memory";
 const INACTIVE_SWAP_GRAPH_RETENTION_TICKS: u64 = 600;
 
-struct PerDevice {
+struct SwapUiMode {
     usage: Option<SwapUsage>,
     show_options: bool,
 }
@@ -51,12 +51,8 @@ pub struct SwapGraphEntry {
 
 enum SwapUiState {
     Hidden,
-    Combined {
-        usage: Option<SwapUsage>,
-        show_options: bool,
-    },
-
-    PerDevice(PerDevice),
+    Combined(SwapUiMode),
+    PerDevice(SwapUiMode),
 }
 
 mod imp {
@@ -409,14 +405,11 @@ impl ResMemory {
                 imp.swap_devices.set_visible(false);
                 imp.options.set_visible(false);
             }
-            SwapUiState::Combined {
-                usage,
-                show_options,
-            } => {
+            SwapUiState::Combined(combined) => {
                 imp.swap.set_visible(true);
                 imp.swap_devices.set_visible(false);
-                imp.options.set_visible(*show_options);
-                Self::add_swap_usage_label(&mut usage_labels, *usage);
+                imp.options.set_visible(combined.show_options);
+                Self::add_swap_usage_label(&mut usage_labels, combined.usage);
             }
             SwapUiState::PerDevice(per_device) => {
                 imp.swap.set_visible(false);
@@ -560,15 +553,15 @@ impl ResMemory {
         }
 
         if is_separate {
-            SwapUiState::PerDevice(PerDevice {
+            SwapUiState::PerDevice(SwapUiMode {
                 usage,
                 show_options: has_multiple_devices,
             })
         } else {
-            SwapUiState::Combined {
+            SwapUiState::Combined(SwapUiMode {
                 usage,
                 show_options: has_multiple_devices,
-            }
+            })
         }
     }
 }
