@@ -1,13 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::iter::Sum;
-use std::path::PathBuf;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Result, bail};
 use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::trace;
 
-use crate::gpu_usage::{GpuIdentifier, GpuUsageStats};
+use crate::gpu_usage::{GpuClientId, GpuClientSnapshots, GpuDriverStats, GpuIdentifier};
 use crate::npu_usage::NpuUsageStats;
 use crate::pci_slot::PciSlot;
 use crate::util::read_parsed;
@@ -68,8 +69,6 @@ static MEM_DRM_FIELDS: Lazy<HashMap<&str, Vec<&str>>> = Lazy::new(|| {
     ])
 });
 
-pub type FdKey = (libc::pid_t, usize);
-
 #[derive(Debug, Clone)]
 pub struct Fdinfo {
     pub pid: libc::pid_t,
@@ -86,16 +85,14 @@ fn parse_fdinfo<S: Into<String>>(file_contents: S) -> HashMap<String, String> {
         .collect::<HashMap<_, _>>()
 }
 
-pub fn collect_fdinfos(
-    pid: libc::pid_t,
-    non_gpu_fdinfos: &mut HashSet<FdKey>,
-    non_npu_fdinfos: &mut HashSet<FdKey>,
-    symlink_cache: &mut HashMap<FdKey, PathBuf>,
-) -> Result<Vec<Fdinfo>> {
-    let fdinfo_dir = PathBuf::from(format!("/proc/{pid}/fdinfo"));
-    let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
+pub fn collect_fdinfos(pid: libc::pid_t) -> Result<Vec<Fdinfo>> {
+    collect_fdinfos_from(pid, &PathBuf::from(format!("/proc/{pid}")))
+}
 
-    let mut seen_targets: HashMap<PathBuf, usize> = HashMap::new();
+fn collect_fdinfos_from(pid: libc::pid_t, proc_dir: &Path) -> Result<Vec<Fdinfo>> {
+    let fdinfo_dir = proc_dir.join("fdinfo");
+    let fd_dir = proc_dir.join("fd");
+
     let mut return_vec = Vec::new();
 
     for entry in std::fs::read_dir(fdinfo_dir)? {
@@ -109,56 +106,21 @@ pub fn collect_fdinfos(
             .parse::<usize>()
             .unwrap_or(0);
 
-        let is_cached_non_gpu = non_gpu_fdinfos.contains(&(pid, fd_num));
-        let is_cached_non_npu = non_npu_fdinfos.contains(&(pid, fd_num));
-
-        let fd_symlink = fd_dir.join(fd_num.to_string());
-        let symlink_target = {
-            if let Some(cached_target) = symlink_cache.get(&(pid, fd_num)) {
-                Some(cached_target.clone())
-            } else {
-                std::fs::read_link(&fd_symlink).ok()
-            }
-        };
-
-        if is_cached_non_gpu && is_cached_non_npu {
-            if let Some(ref target) = symlink_target {
-                // skip if target doesn't look like a GPU/NPU device
-                let target_str = target.to_string_lossy();
-                if !target_str.contains("/dev/dri/") && !target_str.contains("/dev/accel/") {
-                    trace!(
-                        "fdinfo is known to be not related with NPUs and GPUs (target: {:?}), skipping",
-                        target
-                    );
-                    continue;
-                }
-                // target changed to a GPU/NPU device, remove from cache
-                trace!("fdinfo target changed to GPU/NPU device, removing from cache");
-                non_gpu_fdinfos.remove(&(pid, fd_num));
-                non_npu_fdinfos.remove(&(pid, fd_num));
-            }
-        }
-
-        if let Some(ref target) = symlink_target {
-            if let Some(&first_fd) = seen_targets.get(target) {
-                trace!(
-                    "fdinfo {} points to same target as fd {} (target: {:?}), skipping",
-                    fd_num, first_fd, target
-                );
+        // Recheck the actual FD on every scan: paths and descriptor numbers
+        // identify neither the lifetime nor the identity of an open DRM client.
+        if let Ok(metadata) = std::fs::metadata(fd_dir.join(fd_num.to_string())) {
+            let major = libc::major(metadata.rdev());
+            if metadata.mode() & libc::S_IFMT != libc::S_IFCHR || !matches!(major, 226 | 261) {
                 continue;
             }
-            seen_targets.insert(target.clone(), fd_num);
-            symlink_cache.insert((pid, fd_num), target.clone());
         }
-
+        // If metadata cannot be read, still try fdinfo (permissions can differ).
         trace!("fdinfo passed all checks, reading and parsing…");
 
         let content = match read_parsed::<String>(fdinfo_path) {
             Ok(content) => content,
             Err(_) => {
                 trace!("couldn't read fdinfo, skipping…");
-                non_gpu_fdinfos.insert((pid, fd_num));
-                non_npu_fdinfos.insert((pid, fd_num));
                 continue;
             }
         };
@@ -210,7 +172,7 @@ fn drm_mem_bytes(driver: &str, fdinfo: &Fdinfo) -> u64 {
         .unwrap_or_default()
 }
 
-fn extract_gpu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(GpuIdentifier, GpuUsageStats)> {
+fn extract_gpu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(GpuIdentifier, GpuDriverStats)> {
     let Some(driver) = fdinfo.content.get(DRM_DRIVER) else {
         bail!("unable to find gpu information in this fdinfo");
     };
@@ -223,23 +185,23 @@ fn extract_gpu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(GpuIdentifier, GpuU
         .unwrap_or_default();
 
     let stats = match driver.as_str() {
-        "amdgpu" => GpuUsageStats::AmdgpuStats {
+        "amdgpu" => GpuDriverStats::AmdgpuStats {
             gfx_ns: drm_field(driver, &GFX_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
             enc_ns: drm_field(driver, &ENC_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
             dec_ns: drm_field(driver, &DEC_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
             mem_bytes: drm_mem_bytes(driver, fdinfo),
         },
-        "i915" => GpuUsageStats::I915Stats {
+        "i915" => GpuDriverStats::I915Stats {
             gfx_ns: drm_field(driver, &GFX_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
             video_ns: drm_field(driver, &ENC_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
         },
-        "v3d" => GpuUsageStats::V3dStats {
+        "v3d" => GpuDriverStats::V3dStats {
             gfx_ns: drm_field(driver, &GFX_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
             mem_bytes: drm_mem_bytes(driver, fdinfo),
         },
-        "xe" => GpuUsageStats::XeStats {
-            gfx_cycles: drm_field(driver, &GFX_CYCLES_DRM_FIELDS, fdinfo, &RE_DRM_UNITS),
-            gfx_total_cycles: drm_field(
+        "xe" => GpuDriverStats::XeStats {
+            render_cycles: drm_field(driver, &GFX_CYCLES_DRM_FIELDS, fdinfo, &RE_DRM_UNITS),
+            render_total_cycles: drm_field(
                 driver,
                 &GFX_TOTAL_CYCLES_DRM_FIELDS,
                 fdinfo,
@@ -292,8 +254,7 @@ fn extract_npu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(PciSlot, NpuUsageSt
 #[must_use]
 pub fn other_gpu_usage_stats(
     fdinfos: &[Fdinfo],
-    non_gpu_fdinfos: &mut HashSet<FdKey>,
-) -> std::collections::BTreeMap<GpuIdentifier, GpuUsageStats> {
+) -> std::collections::BTreeMap<GpuIdentifier, GpuClientSnapshots> {
     let mut return_map = std::collections::BTreeMap::new();
 
     for fdinfo in fdinfos {
@@ -302,18 +263,24 @@ pub fn other_gpu_usage_stats(
                 "Successfully got GPU statistics from fdinfo {}/{}",
                 fdinfo.pid, fdinfo.fdinfo_num
             );
+            let client = fdinfo
+                .content
+                .get("drm-client-id")
+                .and_then(|id| id.parse().ok())
+                .map(GpuClientId::Drm)
+                .unwrap_or(GpuClientId::Fd {
+                    pid: fdinfo.pid,
+                    fd: fdinfo.fdinfo_num,
+                });
             return_map
                 .entry(identifier)
-                .and_modify(|existing_value: &mut GpuUsageStats| {
-                    *existing_value = existing_value.greater(&stats);
-                })
-                .or_insert(stats);
+                .or_insert_with(GpuClientSnapshots::default)
+                .insert_client(client, stats);
         } else {
             trace!(
-                "fdinfo {}/{} is not GPU-related, will be skipped in the future",
+                "fdinfo {}/{} is not supported GPU statistics",
                 fdinfo.pid, fdinfo.fdinfo_num
             );
-            non_gpu_fdinfos.insert((fdinfo.pid, fdinfo.fdinfo_num));
         }
     }
 
@@ -321,10 +288,7 @@ pub fn other_gpu_usage_stats(
 }
 
 #[must_use]
-pub fn npu_usage_stats(
-    fdinfos: &[Fdinfo],
-    non_npu_fdinfos: &mut HashSet<FdKey>,
-) -> std::collections::BTreeMap<PciSlot, NpuUsageStats> {
+pub fn npu_usage_stats(fdinfos: &[Fdinfo]) -> std::collections::BTreeMap<PciSlot, NpuUsageStats> {
     let mut return_map = std::collections::BTreeMap::new();
 
     for fdinfo in fdinfos {
@@ -341,12 +305,144 @@ pub fn npu_usage_stats(
                 .or_insert(stats);
         } else {
             trace!(
-                "fdinfo {}/{} is not NPU-related, will be skipped in the future",
+                "fdinfo {}/{} is not supported NPU statistics",
                 fdinfo.pid, fdinfo.fdinfo_num
             );
-            non_npu_fdinfos.insert((fdinfo.pid, fdinfo.fdinfo_num));
         }
     }
 
     return_map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn fdinfo(fd: usize, client: Option<u64>, busy: u64) -> Fdinfo {
+        let mut content = format!(
+            "drm-driver: xe\ndrm-pdev: 0000:00:02.0\ndrm-cycles-rcs: {busy}\ndrm-total-cycles-rcs: 10000\n"
+        );
+        if let Some(client) = client {
+            content.push_str(&format!("drm-client-id: {client}\n"));
+        }
+        Fdinfo {
+            pid: 43997,
+            fdinfo_num: fd,
+            content: parse_fdinfo(content),
+        }
+    }
+
+    #[test]
+    fn distinct_clients_survive_and_duplicate_client_keeps_a_complete_sample() {
+        let rows = [
+            fdinfo(274, Some(263), 0),
+            fdinfo(304, Some(266), 8000),
+            fdinfo(305, Some(266), 8001),
+        ];
+        let result = other_gpu_usage_stats(&rows);
+        let stats = result.values().next().unwrap();
+        assert_eq!(stats.clients.len(), 2);
+        let GpuDriverStats::XeStats {
+            render_cycles,
+            render_total_cycles,
+            ..
+        } = stats.clients[&GpuClientId::Drm(266)].driver_stats
+        else {
+            panic!()
+        };
+        assert_eq!((render_cycles, render_total_cycles), (8000, 10000));
+    }
+
+    #[test]
+    fn missing_client_ids_are_not_merged_with_client_zero() {
+        let rows = [
+            fdinfo(1, None, 1),
+            fdinfo(2, None, 2),
+            fdinfo(3, Some(0), 3),
+        ];
+        let result = other_gpu_usage_stats(&rows);
+        assert_eq!(result.values().next().unwrap().clients.len(), 3);
+    }
+
+    #[test]
+    fn client_ids_are_scoped_to_the_device() {
+        let a = fdinfo(1, Some(1), 10);
+        let mut b = fdinfo(2, Some(1), 20);
+        b.content.insert(DRM_PDEV.into(), "0000:01:00.0".into());
+        assert_eq!(other_gpu_usage_stats(&[a, b]).len(), 2);
+    }
+
+    struct ProcFixture(PathBuf);
+    impl ProcFixture {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "resources-fdinfo-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::create_dir(path.join("fd")).unwrap();
+            std::fs::create_dir(path.join("fdinfo")).unwrap();
+            Self(path)
+        }
+        fn write(&self, fd: usize, client: u64) {
+            let row = fdinfo(fd, Some(client), 100);
+            let content: String = row
+                .content
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}\n"))
+                .collect();
+            std::fs::write(self.0.join("fdinfo").join(fd.to_string()), content).unwrap();
+        }
+    }
+    impl Drop for ProcFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn collection_does_not_deduplicate_device_paths() {
+        let fixture = ProcFixture::new();
+        for (fd, client) in [(274, 263), (304, 266)] {
+            fixture.write(fd, client);
+            // A missing device also exercises the fdinfo fallback when stat fails.
+            symlink(
+                "/dev/dri/resources-test-missing-render-node",
+                fixture.0.join("fd").join(fd.to_string()),
+            )
+            .unwrap();
+        }
+        let rows = collect_fdinfos_from(43997, &fixture.0).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            other_gpu_usage_stats(&rows)
+                .values()
+                .next()
+                .unwrap()
+                .clients
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn reused_fd_is_reclassified_on_every_scan() {
+        let fixture = ProcFixture::new();
+        let link = fixture.0.join("fd/304");
+        fixture.write(304, 266);
+        symlink("/dev/null", &link).unwrap();
+        assert!(collect_fdinfos_from(43997, &fixture.0).unwrap().is_empty());
+        std::fs::remove_file(&link).unwrap();
+        symlink("/dev/dri/resources-test-missing-render-node", &link).unwrap();
+        let rows = collect_fdinfos_from(43997, &fixture.0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content["drm-client-id"], "266");
+        fixture.write(304, 999);
+        let rows = collect_fdinfos_from(43997, &fixture.0).unwrap();
+        assert_eq!(rows[0].content["drm-client-id"], "999");
+    }
 }

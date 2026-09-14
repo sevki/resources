@@ -3,7 +3,7 @@ use config::LIBEXECDIR;
 use log::{debug, error, info, trace};
 use process_data::{
     Niceness, ProcessData,
-    gpu_usage::{GpuIdentifier, GpuUsageStats},
+    gpu_usage::{GpuClientSnapshots, GpuIdentifier},
     npu_usage::NpuUsageStats,
     pci_slot::PciSlot,
 };
@@ -92,7 +92,7 @@ pub struct Process {
     pub timestamp_last: u64,
     pub read_bytes_last: Option<u64>,
     pub write_bytes_last: Option<u64>,
-    pub gpu_usage_stats_last: BTreeMap<GpuIdentifier, GpuUsageStats>,
+    pub gpu_usage_stats_last: BTreeMap<GpuIdentifier, GpuClientSnapshots>,
     pub npu_usage_stats_last: BTreeMap<PciSlot, NpuUsageStats>,
     pub display_name: String,
 }
@@ -438,10 +438,7 @@ impl Process {
         let mut returned_gpu_usage = 0.0;
         for (gpu, usage) in &self.data.gpu_usage_stats {
             if let Some(old_usage) = self.gpu_usage_stats_last.get(gpu) {
-                let time_delta = self.data.timestamp.saturating_sub(self.timestamp_last);
-                returned_gpu_usage += usage
-                    .gfx_fraction(old_usage, time_delta)
-                    .unwrap_or_default();
+                returned_gpu_usage += usage.fractions(old_usage).gfx;
             }
         }
 
@@ -453,10 +450,7 @@ impl Process {
         let mut returned_gpu_usage = 0.0;
         for (gpu, usage) in &self.data.gpu_usage_stats {
             if let Some(old_usage) = self.gpu_usage_stats_last.get(gpu) {
-                let time_delta = self.data.timestamp.saturating_sub(self.timestamp_last);
-                returned_gpu_usage += usage
-                    .enc_fraction(old_usage, time_delta)
-                    .unwrap_or_default();
+                returned_gpu_usage += usage.fractions(old_usage).enc;
             }
         }
 
@@ -468,10 +462,7 @@ impl Process {
         let mut returned_gpu_usage = 0.0;
         for (gpu, usage) in &self.data.gpu_usage_stats {
             if let Some(old_usage) = self.gpu_usage_stats_last.get(gpu) {
-                let time_delta = self.data.timestamp.saturating_sub(self.timestamp_last);
-                returned_gpu_usage += usage
-                    .dec_fraction(old_usage, time_delta)
-                    .unwrap_or_default();
+                returned_gpu_usage += usage.fractions(old_usage).dec;
             }
         }
 

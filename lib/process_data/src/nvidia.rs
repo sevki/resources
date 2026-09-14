@@ -9,7 +9,7 @@ use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::struct_wrappers::device::{ProcessInfo, ProcessUtilizationSample};
 use nvml_wrapper::{Device, Nvml};
 
-use crate::gpu_usage::{GpuIdentifier, GpuUsageStats};
+use crate::gpu_usage::{GpuClientSnapshots, GpuDriverStats, GpuIdentifier};
 use crate::pci_slot::PciSlot;
 use crate::units::IntegerPercentage;
 use crate::util::unix_as_millis;
@@ -81,7 +81,11 @@ impl NvidiaSnapshot {
         }
     }
 
-    fn gpu_stats_for_slot(&self, pid: libc::pid_t, pci_slot: PciSlot) -> Result<GpuUsageStats> {
+    fn gpu_stats_for_slot(
+        &self,
+        pid: libc::pid_t,
+        pci_slot: PciSlot,
+    ) -> Result<GpuClientSnapshots> {
         let this_process_stats = self
             .process_stats
             .get(&pci_slot)
@@ -103,22 +107,28 @@ impl NvidiaSnapshot {
             })
             .sum();
 
-        Ok(GpuUsageStats::NvidiaStats {
-            gfx_percentage: IntegerPercentage::try_new(
-                this_process_stats.unwrap_or_default().0 as u8,
-            )?,
-            mem_bytes: this_process_mem_stats,
-            enc_percentage: IntegerPercentage::try_new(
-                this_process_stats.unwrap_or_default().1 as u8,
-            )?,
-            dec_percentage: IntegerPercentage::try_new(
-                this_process_stats.unwrap_or_default().2 as u8,
-            )?,
-        })
+        Ok(GpuClientSnapshots::from_client(
+            crate::gpu_usage::GpuClientId::Process(pid),
+            GpuDriverStats::NvidiaStats {
+                gfx_percentage: IntegerPercentage::try_new(
+                    this_process_stats.unwrap_or_default().0 as u8,
+                )?,
+                mem_bytes: this_process_mem_stats,
+                enc_percentage: IntegerPercentage::try_new(
+                    this_process_stats.unwrap_or_default().1 as u8,
+                )?,
+                dec_percentage: IntegerPercentage::try_new(
+                    this_process_stats.unwrap_or_default().2 as u8,
+                )?,
+            },
+        ))
     }
 
     #[must_use]
-    pub fn gpu_usage_stats_all(&self, pid: libc::pid_t) -> BTreeMap<GpuIdentifier, GpuUsageStats> {
+    pub fn gpu_usage_stats_all(
+        &self,
+        pid: libc::pid_t,
+    ) -> BTreeMap<GpuIdentifier, GpuClientSnapshots> {
         let mut return_map = BTreeMap::new();
 
         for (pci_slot, _) in NVML_DEVICES.iter() {
