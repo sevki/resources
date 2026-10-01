@@ -2,6 +2,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::units::ns_delta_to_usage_fraction;
 
+// drm-engine-npu-amdxdna in the legacy out-of-tree driver
+pub const AMDXDNA_BUSY_FIELDS: [&str; 2] =
+    ["drm-engine-amdxdna_accel_driver", "drm-engine-npu-amdxdna"];
+
+// drm-total-memory counts the dev BOs twice: they are carved out of the heap BO
+pub const AMDXDNA_MEMORY_FIELDS: [&str; 2] = [
+    "amdxdna_accel_driver-internal-alloc",
+    "amdxdna_accel_driver-external-alloc",
+];
+
+pub const AMDXDNA_TOTAL_MEMORY_FIELD: &str = "drm-total-memory";
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub enum NpuUsageStats {
     AmdxdnaStats { usage_ns: u64, mem_bytes: u64 },

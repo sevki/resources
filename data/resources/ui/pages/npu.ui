@@ -65,7 +65,7 @@
                   </object>
                 </child>
                 <child>
-                  <object class="AdwPreferencesGroup">
+                  <object class="AdwPreferencesGroup" id="sensors">
                     <property name="title" translatable="yes">Sensors</property>
                     <child>
                       <object class="ResGraphBox" id="temperature"/>

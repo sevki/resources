@@ -56,6 +56,8 @@ impl NpuData {
 
         trace!("Gathering NPU data for {pci_slot}…");
 
+        npu.update();
+
         let usage_fraction = npu.usage().ok();
 
         let total_memory = npu.total_memory().ok();
@@ -116,6 +118,22 @@ pub trait NpuImpl {
     fn driver(&self) -> &str;
     fn sysfs_path(&self) -> &Path;
     fn first_hwmon(&self) -> Option<&Path>;
+
+    // called once per refresh, before the getters
+    fn update(&self) {}
+
+    // usage and memory are then the sums over the processes' fdinfo
+    fn busy_time_per_client(&self) -> bool {
+        false
+    }
+
+    fn memory_per_client(&self) -> bool {
+        false
+    }
+
+    fn hide_unavailable(&self) -> bool {
+        false
+    }
 
     fn name(&self) -> Result<String>;
     fn usage(&self) -> Result<f64>;

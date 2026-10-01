@@ -748,7 +748,7 @@ impl AppsContext {
                 let time_delta = timestamp.saturating_sub(timestamp_last);
                 new.usage_fraction(old, time_delta).unwrap_or_default()
             })
-            .sum::<f32>()
+            .fold(0.0, |sum, fraction| sum + fraction)
             .clamp(0.0, 1.0)
     }
 
