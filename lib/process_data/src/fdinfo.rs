@@ -15,7 +15,8 @@ use crate::util::read_parsed;
 const DRM_DRIVER: &str = "drm-driver";
 const DRM_PDEV: &str = "drm-pdev";
 
-static RE_DRM_KIB: Lazy<Regex> = lazy_regex!(r"(\d+)\s*KiB");
+// drm_fdinfo_print_size() prints bytes, KiB or MiB
+static RE_DRM_SIZE: Lazy<Regex> = lazy_regex!(r"(\d+)\s*([KMG]iB)?");
 static RE_DRM_TIME: Lazy<Regex> = lazy_regex!(r"(\d+)\s*ns");
 static RE_DRM_UNITS: Lazy<Regex> = lazy_regex!(r"(\d+)");
 
@@ -203,10 +204,27 @@ fn drm_field<T: FromStr + Sum + Default>(
         .unwrap_or_default()
 }
 
+fn drm_sizes(fdinfo: &Fdinfo, field_names: &[&str]) -> u64 {
+    field_names
+        .iter()
+        .filter_map(|name| {
+            let captures = RE_DRM_SIZE.captures(fdinfo.content.get(*name)?)?;
+            let size = captures.get(1)?.as_str().parse::<u64>().ok()?;
+            let unit = match captures.get(2).map(|unit| unit.as_str()) {
+                Some("KiB") => 1 << 10,
+                Some("MiB") => 1 << 20,
+                Some("GiB") => 1 << 30,
+                _ => 1,
+            };
+            Some(size.saturating_mul(unit))
+        })
+        .sum()
+}
+
 fn drm_mem_bytes(driver: &str, fdinfo: &Fdinfo) -> u64 {
     MEM_DRM_FIELDS
         .get(driver)
-        .map(|names| parse_drm_fields::<u64, _>(fdinfo, names, &RE_DRM_KIB).saturating_mul(1024))
+        .map(|names| drm_sizes(fdinfo, names))
         .unwrap_or_default()
 }
 
