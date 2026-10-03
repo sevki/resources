@@ -1,9 +1,10 @@
-use std::process::Command;
+use std::{fmt::Display, process::Command};
 
 use anyhow::{Context, Result, bail};
 use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::{debug, trace};
 
+use crate::utils::i18n::i18n;
 use crate::utils::{FLATPAK_APP_PATH, FLATPAK_SPAWN, IS_FLATPAK, read_parsed};
 
 const PROC_MEMINFO: &str = "/proc/meminfo";
@@ -54,10 +55,42 @@ pub struct MemoryData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapDevice {
     pub name: String,
-    pub r#type: String,
+    pub r#type: SwapType,
     pub size: usize,
     pub used: usize,
     pub priority: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SwapType {
+    Partition,
+    File,
+    #[default]
+    Unknown,
+}
+
+impl SwapType {
+    pub fn from_proc_swaps<S: AsRef<str>>(swap_type: S) -> Self {
+        match swap_type.as_ref() {
+            "partition" => Self::Partition,
+            "file" => Self::File,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl Display for SwapType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Partition => i18n("Partition"),
+                Self::File => i18n("File"),
+                Self::Unknown => i18n("N/A"),
+            }
+        )
+    }
 }
 
 impl MemoryData {
@@ -120,7 +153,7 @@ impl SwapDevice {
         for line in swaps_content.lines().skip(1) {
             if let Some(captures) = RE_PROC_SWAPS_LINE.captures(line) {
                 let name = captures[1].to_string();
-                let r#type = captures[2].to_string();
+                let r#type = SwapType::from_proc_swaps(&captures[2]);
                 let size = captures[3].parse::<usize>()? * 1024;
                 let used = captures[4].parse::<usize>()? * 1024;
                 let priority = captures[5].parse::<i32>()?;
@@ -136,6 +169,53 @@ impl SwapDevice {
         }
 
         Ok(devices)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proc_swaps() {
+        let content = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
+                       /dev/dm-0                               partition\t15624188\t0\t-1\n\
+                       /dev/zram0                              partition\t7782396\t664\t100\n";
+
+        let mut devices = Vec::new();
+        for line in content.lines().skip(1) {
+            if let Some(captures) = RE_PROC_SWAPS_LINE.captures(line) {
+                let name = captures[1].to_string();
+                let r#type = SwapType::from_proc_swaps(&captures[2]);
+                let size = captures[3].parse::<usize>().unwrap() * 1024;
+                let used = captures[4].parse::<usize>().unwrap() * 1024;
+                let priority = captures[5].parse::<i32>().unwrap();
+
+                devices.push(SwapDevice {
+                    name,
+                    r#type,
+                    size,
+                    used,
+                    priority,
+                });
+            }
+        }
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name, "/dev/dm-0");
+        assert_eq!(devices[0].r#type, SwapType::Partition);
+        assert_eq!(devices[0].priority, -1);
+        assert_eq!(devices[1].name, "/dev/zram0");
+        assert_eq!(devices[1].used, 664 * 1024);
+        assert_eq!(devices[1].r#type, SwapType::Partition);
+        assert_eq!(devices[1].priority, 100);
+    }
+
+    #[test]
+    fn swap_type_from_proc_swaps_maps_known_and_unknown_values() {
+        assert_eq!(SwapType::from_proc_swaps("partition"), SwapType::Partition);
+        assert_eq!(SwapType::from_proc_swaps("file"), SwapType::File);
+        assert_eq!(SwapType::from_proc_swaps("unknown"), SwapType::Unknown);
     }
 }
 
@@ -345,8 +425,9 @@ impl MemoryDevice {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use pretty_assertions::assert_eq;
+
+    use crate::devices::memory::MemoryDevice;
 
     const DMIDECODE_OUTPUT: &str = concat!(
         "Memory Device\n",
@@ -418,39 +499,6 @@ mod test {
         "E: MEMORY_DEVICE_2_PRESENT=0\n",
         "E: MEMORY_ARRAY_NUM_DEVICES=2"
     );
-
-    #[test]
-    fn test_parse_proc_swaps() {
-        let content = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
-                       /dev/dm-0                               partition\t15624188\t0\t-1\n\
-                       /dev/zram0                              partition\t7782396\t664\t100\n";
-
-        let mut devices = Vec::new();
-        for line in content.lines().skip(1) {
-            if let Some(captures) = RE_PROC_SWAPS_LINE.captures(line) {
-                let name = captures[1].to_string();
-                let r#type = captures[2].to_string();
-                let size = captures[3].parse::<usize>().unwrap() * 1024;
-                let used = captures[4].parse::<usize>().unwrap() * 1024;
-                let priority = captures[5].parse::<i32>().unwrap();
-
-                devices.push(SwapDevice {
-                    name,
-                    r#type,
-                    size,
-                    used,
-                    priority,
-                });
-            }
-        }
-
-        assert_eq!(devices.len(), 2);
-        assert_eq!(devices[0].name, "/dev/dm-0");
-        assert_eq!(devices[0].priority, -1);
-        assert_eq!(devices[1].name, "/dev/zram0");
-        assert_eq!(devices[1].used, 664 * 1024);
-        assert_eq!(devices[1].priority, 100);
-    }
 
     #[test]
     fn valid_dmidecode_complex() {

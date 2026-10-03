@@ -482,7 +482,11 @@ impl ResMemory {
     fn update_swap_graph_labels(graph_box: &ResGraphBox, device: &SwapDevice) {
         graph_box.set_title_label(&i18n_f(
             "{} · {} · Priority: {}",
-            &[&device.name, &device.r#type, &device.priority.to_string()],
+            &[
+                &device.name,
+                &device.r#type.to_string(),
+                &device.priority.to_string(),
+            ],
         ));
         graph_box.set_subtitle(&convert_fraction(
             Self::fraction_or_zero(device.used as u64, device.size as u64),
