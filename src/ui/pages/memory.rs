@@ -479,16 +479,14 @@ impl ResMemory {
         }
     }
 
-    fn update_swap_graph_subtitle(graph_box: &ResGraphBox, device: &SwapDevice) {
-        graph_box.set_subtitle(&i18n_f(
-            // Translators: 1st is used swap, 2nd is total swap, 3rd is type, 4th is priority
-            "{} / {} · {} · Priority: {}",
-            &[
-                &convert_storage(device.used as f64, false),
-                &convert_storage(device.size as f64, false),
-                &device.r#type,
-                &device.priority.to_string(),
-            ],
+    fn update_swap_graph_labels(graph_box: &ResGraphBox, device: &SwapDevice) {
+        graph_box.set_title_label(&i18n_f(
+            "{} · {} · Priority: {}",
+            &[&device.name, &device.r#type, &device.priority.to_string()],
+        ));
+        graph_box.set_subtitle(&convert_fraction(
+            Self::fraction_or_zero(device.used as u64, device.size as u64),
+            true,
         ));
     }
 
@@ -531,15 +529,14 @@ impl ResMemory {
                 entry
                     .graph_box
                     .add_storage_point(Some(device.used as u64), Some(device.size as u64));
-                Self::update_swap_graph_subtitle(&entry.graph_box, device);
+                Self::update_swap_graph_labels(&entry.graph_box, device);
                 continue;
             }
 
             let graph_box = ResGraphBox::new();
-            graph_box.set_title_label(&device.name);
             graph_box.graph().set_graph_color(0x94, 0x29, 0x7c);
             graph_box.add_storage_point(Some(device.used as u64), Some(device.size as u64));
-            Self::update_swap_graph_subtitle(&graph_box, device);
+            Self::update_swap_graph_labels(&graph_box, device);
 
             imp.swap_devices.add(&graph_box);
             swap_graphs.push(SwapGraphEntry {
