@@ -581,10 +581,17 @@ impl ResMemory {
         swap_device_count: usize,
         usage: Option<SwapUsage>,
     ) -> SwapUiState {
-        let has_multiple_devices = swap_device_count > 1;
-
         if swap_device_count == 0 {
             return SwapUiState::Hidden;
+        }
+
+        let has_multiple_devices = swap_device_count > 1;
+
+        if !has_multiple_devices {
+            return SwapUiState::Combined(SwapUiMode {
+                usage,
+                show_options: false,
+            });
         }
 
         if is_separate {
@@ -598,5 +605,34 @@ impl ResMemory {
                 show_options: has_multiple_devices,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResMemory, SwapUiState};
+
+    #[test]
+    fn swap_ui_state_hides_when_no_devices_are_present() {
+        assert!(matches!(
+            ResMemory::swap_ui_state(false, 0, None),
+            SwapUiState::Hidden
+        ));
+    }
+
+    #[test]
+    fn swap_ui_state_uses_combined_mode_for_a_single_device_even_if_separate_is_enabled() {
+        assert!(matches!(
+            ResMemory::swap_ui_state(true, 1, None),
+            SwapUiState::Combined(_)
+        ));
+    }
+
+    #[test]
+    fn swap_ui_state_keeps_per_device_mode_for_multiple_devices_when_enabled() {
+        assert!(matches!(
+            ResMemory::swap_ui_state(true, 2, None),
+            SwapUiState::PerDevice(_)
+        ));
     }
 }
