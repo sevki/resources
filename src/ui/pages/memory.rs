@@ -488,10 +488,14 @@ impl ResMemory {
                 &device.priority.to_string(),
             ],
         ));
-        graph_box.set_subtitle(&convert_fraction(
-            Self::fraction_or_zero(device.used as u64, device.size as u64),
-            true,
-        ));
+        let fraction = Self::fraction_or_zero(device.used as u64, device.size as u64);
+        let subtitle = format!(
+            "{} / {} · {}",
+            convert_storage(device.used as f64, false),
+            convert_storage(device.size as f64, false),
+            convert_fraction(fraction, true),
+        );
+        graph_box.set_subtitle(&subtitle);
     }
 
     fn add_swap_usage_label(usage_labels: &mut UsageLabels, usage: Option<SwapUsage>) {
