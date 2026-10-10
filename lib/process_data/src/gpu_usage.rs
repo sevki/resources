@@ -48,6 +48,10 @@ pub enum GpuUsageStats {
         gfx_ns: u64,
         mem_bytes: u64,
     },
+    PanthorStats {
+        gfx_ns: u64,
+        mem_bytes: u64,
+    },
     XeStats {
         gfx_cycles: u64,
         gfx_total_cycles: u64,
@@ -69,7 +73,8 @@ impl GpuUsageStats {
         match (self, old) {
             (Self::AmdgpuStats { gfx_ns: a, .. }, Self::AmdgpuStats { gfx_ns: b, .. })
             | (Self::I915Stats { gfx_ns: a, .. }, Self::I915Stats { gfx_ns: b, .. })
-            | (Self::V3dStats { gfx_ns: a, .. }, Self::V3dStats { gfx_ns: b, .. }) => {
+            | (Self::V3dStats { gfx_ns: a, .. }, Self::V3dStats { gfx_ns: b, .. })
+            | (Self::PanthorStats { gfx_ns: a, .. }, Self::PanthorStats { gfx_ns: b, .. }) => {
                 ns_delta_to_usage_fraction(*a, *b, time_delta_ms)
             }
             (Self::NvidiaStats { gfx_percentage, .. }, Self::NvidiaStats { .. }) => {
@@ -164,6 +169,7 @@ impl GpuUsageStats {
             Self::AmdgpuStats { mem_bytes, .. }
             | Self::NvidiaStats { mem_bytes, .. }
             | Self::V3dStats { mem_bytes, .. }
+            | Self::PanthorStats { mem_bytes, .. }
             | Self::XeStats { mem_bytes, .. } => Some(*mem_bytes),
             Self::I915Stats { .. } => None,
         }
@@ -233,6 +239,19 @@ impl GpuUsageStats {
                     mem_bytes: b_mem,
                 },
             ) => Self::V3dStats {
+                gfx_ns: *a_gfx.max(b_gfx),
+                mem_bytes: *a_mem.max(b_mem),
+            },
+            (
+                Self::PanthorStats {
+                    gfx_ns: a_gfx,
+                    mem_bytes: a_mem,
+                },
+                Self::PanthorStats {
+                    gfx_ns: b_gfx,
+                    mem_bytes: b_mem,
+                },
+            ) => Self::PanthorStats {
                 gfx_ns: *a_gfx.max(b_gfx),
                 mem_bytes: *a_mem.max(b_mem),
             },

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::iter::Sum;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Result, bail};
@@ -23,6 +23,7 @@ static GFX_NS_DRM_FIELDS: Lazy<HashMap<&str, Vec<&str>>> = Lazy::new(|| {
     HashMap::from_iter([
         ("amdgpu", vec!["drm-engine-compute", "drm-engine-gfx"]),
         ("i915", vec!["drm-engine-render"]),
+        ("panthor", vec!["drm-engine-panthor"]),
         ("v3d", vec!["drm-engine-render"]),
     ])
 });
@@ -63,6 +64,7 @@ static MEM_DRM_FIELDS: Lazy<HashMap<&str, Vec<&str>>> = Lazy::new(|| {
         ("amdgpu", vec!["drm-memory-gtt", "drm-memory-vram"]),
         ("amdxdna_accel_driver", vec!["drm-total-memory"]),
         ("i915", vec!["drm-total-local0", "drm-total-system0"]),
+        ("panthor", vec!["drm-total-memory"]),
         ("v3d", vec!["drm-total-memory"]),
         ("xe", vec!["drm-total-gtt", "drm-total-vram0"]),
     ])
@@ -75,6 +77,7 @@ pub struct Fdinfo {
     pub pid: libc::pid_t,
     pub fdinfo_num: usize,
     pub content: HashMap<String, String>,
+    pub target: Option<PathBuf>,
 }
 
 fn parse_fdinfo<S: Into<String>>(file_contents: S) -> HashMap<String, String> {
@@ -167,6 +170,7 @@ pub fn collect_fdinfos(
             pid,
             fdinfo_num: fd_num,
             content: parse_fdinfo(content),
+            target: symlink_target,
         });
     }
 
@@ -210,16 +214,50 @@ fn drm_mem_bytes(driver: &str, fdinfo: &Fdinfo) -> u64 {
         .unwrap_or_default()
 }
 
+/// Resolves a DRM device node (e.g. `/dev/dri/renderD128`) to the number of the DRM card it
+/// belongs to (e.g. `1` for `card1`), matching the enumerator used for non-PCI GPUs
+fn drm_card_enumerator(device_node: &Path) -> Option<usize> {
+    let node_name = device_node.strip_prefix("/dev/dri").ok()?.to_str()?;
+
+    if let Some(card) = node_name.strip_prefix("card") {
+        return card.parse().ok();
+    }
+
+    std::fs::read_dir(
+        Path::new("/sys/class/drm")
+            .join(node_name)
+            .join("device/drm"),
+    )
+    .ok()?
+    .flatten()
+    .find_map(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("card"))
+            .and_then(|card| card.parse().ok())
+    })
+}
+
 fn extract_gpu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(GpuIdentifier, GpuUsageStats)> {
     let Some(driver) = fdinfo.content.get(DRM_DRIVER) else {
         bail!("unable to find gpu information in this fdinfo");
     };
 
+    // drm-pdev is only printed for PCI devices, so for platform GPUs (e.g. Arm SoCs) fall back to
+    // the DRM card behind the device node this fd points to
     let gpu_identifier = fdinfo
         .content
         .get(DRM_PDEV)
         .and_then(|field| PciSlot::from_str(field).ok())
         .map(GpuIdentifier::PciSlot)
+        .or_else(|| {
+            fdinfo
+                .target
+                .as_deref()
+                .and_then(drm_card_enumerator)
+                .map(GpuIdentifier::Enumerator)
+        })
         .unwrap_or_default();
 
     let stats = match driver.as_str() {
@@ -232,6 +270,10 @@ fn extract_gpu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(GpuIdentifier, GpuU
         "i915" => GpuUsageStats::I915Stats {
             gfx_ns: drm_field(driver, &GFX_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
             video_ns: drm_field(driver, &ENC_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
+        },
+        "panthor" => GpuUsageStats::PanthorStats {
+            gfx_ns: drm_field(driver, &GFX_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
+            mem_bytes: drm_mem_bytes(driver, fdinfo),
         },
         "v3d" => GpuUsageStats::V3dStats {
             gfx_ns: drm_field(driver, &GFX_NS_DRM_FIELDS, fdinfo, &RE_DRM_TIME),
