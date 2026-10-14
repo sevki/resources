@@ -3,9 +3,8 @@ use log::{debug, info, trace};
 use process_data::{ProcessData, PssMode};
 use ron::ser::PrettyConfig;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io::{Read, Write},
-    path::PathBuf,
     time::Instant,
 };
 
@@ -38,7 +37,6 @@ fn main() -> Result<()> {
 
     let mut non_gpu_fdinfos = HashSet::new();
     let mut non_npu_fdinfos = HashSet::new();
-    let mut symlink_cache = HashMap::new();
 
     if args.once {
         output(
@@ -46,7 +44,6 @@ fn main() -> Result<()> {
             args.pss,
             &mut non_gpu_fdinfos,
             &mut non_npu_fdinfos,
-            &mut symlink_cache,
         )?;
         return Ok(());
     }
@@ -64,7 +61,6 @@ fn main() -> Result<()> {
             args.pss,
             &mut non_gpu_fdinfos,
             &mut non_npu_fdinfos,
-            &mut symlink_cache,
         )?;
     }
 }
@@ -74,12 +70,11 @@ fn output(
     pss: PssMode,
     non_gpu_fdinfos: &mut HashSet<(libc::pid_t, usize)>,
     non_npu_fdinfos: &mut HashSet<(libc::pid_t, usize)>,
-    symlink_cache: &mut HashMap<(libc::pid_t, usize), PathBuf>,
 ) -> Result<()> {
     let start = Instant::now();
 
     trace!("Gathering process data…");
-    let data = ProcessData::all_process_data(non_gpu_fdinfos, non_npu_fdinfos, symlink_cache, pss)?;
+    let data = ProcessData::all_process_data(non_gpu_fdinfos, non_npu_fdinfos, pss)?;
 
     let elapsed = start.elapsed();
     trace!(

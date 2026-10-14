@@ -93,7 +93,6 @@ pub fn collect_fdinfos(
     pid: libc::pid_t,
     non_gpu_fdinfos: &mut HashSet<FdKey>,
     non_npu_fdinfos: &mut HashSet<FdKey>,
-    symlink_cache: &mut HashMap<FdKey, PathBuf>,
 ) -> Result<Vec<Fdinfo>> {
     let fdinfo_dir = PathBuf::from(format!("/proc/{pid}/fdinfo"));
     let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
@@ -115,14 +114,8 @@ pub fn collect_fdinfos(
         let is_cached_non_gpu = non_gpu_fdinfos.contains(&(pid, fd_num));
         let is_cached_non_npu = non_npu_fdinfos.contains(&(pid, fd_num));
 
-        let fd_symlink = fd_dir.join(fd_num.to_string());
-        let symlink_target = {
-            if let Some(cached_target) = symlink_cache.get(&(pid, fd_num)) {
-                Some(cached_target.clone())
-            } else {
-                std::fs::read_link(&fd_symlink).ok()
-            }
-        };
+        // not cached: a process may close a file and reuse its fd number for a GPU or NPU
+        let symlink_target = std::fs::read_link(fd_dir.join(fd_num.to_string())).ok();
 
         if is_cached_non_gpu && is_cached_non_npu {
             if let Some(ref target) = symlink_target {
@@ -151,7 +144,6 @@ pub fn collect_fdinfos(
                 continue;
             }
             seen_targets.insert(target.clone(), fd_num);
-            symlink_cache.insert((pid, fd_num), target.clone());
         }
 
         trace!("fdinfo passed all checks, reading and parsing…");

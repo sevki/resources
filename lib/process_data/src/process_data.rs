@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
@@ -140,7 +140,6 @@ impl ProcessData {
     pub fn all_process_data(
         non_gpu_fdinfos: &mut HashSet<(libc::pid_t, usize)>,
         non_npu_fdinfos: &mut HashSet<(libc::pid_t, usize)>,
-        symlink_cache: &mut HashMap<(libc::pid_t, usize), PathBuf>,
         pss_mode: PssMode,
     ) -> Result<Vec<Self>> {
         let nvidia_stats = NvidiaSnapshot::new();
@@ -152,7 +151,6 @@ impl ProcessData {
                     entry.path(),
                     non_gpu_fdinfos,
                     non_npu_fdinfos,
-                    symlink_cache,
                     pss_mode == PssMode::Exact,
                     &nvidia_stats,
                 );
@@ -201,7 +199,6 @@ impl ProcessData {
         proc_path: P,
         non_gpu_fdinfos: &mut HashSet<(libc::pid_t, usize)>,
         non_npu_fdinfos: &mut HashSet<(libc::pid_t, usize)>,
-        symlink_cache: &mut HashMap<(libc::pid_t, usize), PathBuf>,
         pss_enabled: bool,
         nvidia_stats: &NvidiaSnapshot,
     ) -> Result<Self> {
@@ -265,8 +262,7 @@ impl ProcessData {
 
         trace!("Collecting fdinfo statistics for {pid}…");
         let fdinfos: Vec<Fdinfo> =
-            fdinfo::collect_fdinfos(pid, non_gpu_fdinfos, non_npu_fdinfos, symlink_cache)
-                .unwrap_or_default();
+            fdinfo::collect_fdinfos(pid, non_gpu_fdinfos, non_npu_fdinfos).unwrap_or_default();
 
         trace!("Collecting NVIDIA statistics for {pid}…");
         let mut gpu_usage_stats = fdinfo::other_gpu_usage_stats(&fdinfos, non_gpu_fdinfos);
