@@ -3,6 +3,7 @@ use glob::glob;
 use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::{debug, trace, warn};
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -14,9 +15,18 @@ const PROC_STAT: &str = "/proc/stat";
 
 const KNOWN_HWMONS: &[&str] = &["zenpower", "coretemp", "k10temp", "ibmpowernv"];
 
-const KNOWN_THERMAL_ZONES: &[&str] = &["cpu-thermal", "x86_pkg_temp", "acpitz"];
+// Rockchip RK3588 has no cpu-thermal zone, its SoC package sensor is called package-thermal on
+// mainline kernels and soc-thermal on Rockchip's vendor kernels
+const KNOWN_THERMAL_ZONES: &[&str] = &[
+    "cpu-thermal",
+    "x86_pkg_temp",
+    "acpitz",
+    "package-thermal",
+    "soc-thermal",
+];
 
-static RE_LSCPU_MODEL_NAME: Lazy<Regex> = lazy_regex!(r"Model name:\s*(.*)");
+// anchored so that "BIOS Model name:" (printed when lscpu runs as root) doesn't match
+static RE_LSCPU_MODEL_NAME: Lazy<Regex> = lazy_regex!(r"(?m)^\s*Model name:\s*(.*)$");
 
 static RE_LSCPU_ARCHITECTURE: Lazy<Regex> = lazy_regex!(r"Architecture:\s*(.*)");
 
@@ -24,7 +34,10 @@ static RE_LSCPU_CPUS: Lazy<Regex> = lazy_regex!(r"CPU\(s\):\s*(.*)");
 
 static RE_LSCPU_SOCKETS: Lazy<Regex> = lazy_regex!(r"Socket\(s\):\s*(.*)");
 
-static RE_LSCPU_CORES: Lazy<Regex> = lazy_regex!(r"Core\(s\) per socket:\s*(.*)");
+// lscpu prints "per cluster" instead of "per socket" on e.g. Arm SoCs
+static RE_LSCPU_CORES: Lazy<Regex> = lazy_regex!(r"Core\(s\) per (?:socket|cluster):\s*(.*)");
+
+static RE_LSCPU_CLUSTERS: Lazy<Regex> = lazy_regex!(r"Cluster\(s\):\s*(.*)");
 
 static RE_LSCPU_VIRTUALIZATION: Lazy<Regex> = lazy_regex!(r"Virtualization:\s*(.*)");
 
@@ -158,6 +171,14 @@ impl CpuData {
     }
 }
 
+/// One type of core of a CPU, as described by a "Model name" section of lscpu
+#[derive(Debug, Clone, PartialEq)]
+struct CoreType {
+    name: String,
+    cores: Option<usize>,
+    max_speed: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CpuInfo {
     pub model_name: Option<String>,
@@ -172,14 +193,6 @@ pub struct CpuInfo {
 impl CpuInfo {
     fn parse_lscpu<S: AsRef<str>>(lscpu_output: S) -> Self {
         let lscpu_output = lscpu_output.as_ref();
-
-        let model_name = RE_LSCPU_MODEL_NAME
-            .captures(lscpu_output)
-            .and_then(|captures| {
-                captures
-                    .get(1)
-                    .map(|capture| Self::trade_mark_symbols(capture.as_str()))
-            });
 
         let architecture = RE_LSCPU_ARCHITECTURE
             .captures(lscpu_output)
@@ -199,28 +212,38 @@ impl CpuInfo {
                 .and_then(|capture| capture.as_str().parse().ok())
         });
 
-        let physical_cpus = RE_LSCPU_CORES.captures(lscpu_output).and_then(|captures| {
-            captures
-                .get(1)
-                .and_then(|capture| capture.as_str().parse::<usize>().ok())
-                .map(|int| int.saturating_mul(sockets.unwrap_or(1)))
-        });
-
         let virtualization = RE_LSCPU_VIRTUALIZATION
             .captures(lscpu_output)
             .and_then(|captures| captures.get(1).map(|capture| capture.as_str().into()));
 
-        let max_speed = RE_LSCPU_MAX_MHZ
-            .captures(lscpu_output)
-            .and_then(|captures| {
-                captures.get(1).and_then(|capture| {
-                    capture
-                        .as_str()
-                        .parse::<f64>()
-                        .ok()
-                        .map(|float| float * 1_000_000.0)
-                })
-            });
+        // heterogeneous CPUs (e.g. Arm big.LITTLE) get one "Model name" section per core type
+        let core_types = Self::parse_lscpu_core_types(lscpu_output);
+
+        let model_name = match core_types.as_slice() {
+            [] => None,
+            [core_type] => Some(core_type.name.clone()),
+            core_types => Some(
+                core_types
+                    .iter()
+                    .map(|core_type| match core_type.cores {
+                        Some(cores) => format!("{cores}× {}", core_type.name),
+                        None => core_type.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+            ),
+        };
+
+        let physical_cpus = core_types
+            .iter()
+            .map(|core_type| core_type.cores)
+            .sum::<Option<usize>>()
+            .filter(|_| !core_types.is_empty());
+
+        let max_speed = core_types
+            .iter()
+            .filter_map(|core_type| core_type.max_speed)
+            .reduce(f64::max);
 
         Self {
             model_name,
@@ -231,6 +254,77 @@ impl CpuInfo {
             virtualization,
             max_speed,
         }
+    }
+
+    /// Splits the lscpu output into its "Model name" sections and parses each of them, merging
+    /// sections of the same model and ordering them by their maximum speed, fastest first
+    fn parse_lscpu_core_types(lscpu_output: &str) -> Vec<CoreType> {
+        let section_starts: Vec<_> = RE_LSCPU_MODEL_NAME
+            .find_iter(lscpu_output)
+            .map(|found| found.start())
+            .collect();
+
+        let mut core_types: Vec<CoreType> = Vec::new();
+
+        for (i, &section_start) in section_starts.iter().enumerate() {
+            let section_end = section_starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or(lscpu_output.len());
+            let section = &lscpu_output[section_start..section_end];
+
+            let Some(name) = RE_LSCPU_MODEL_NAME
+                .captures(section)
+                .and_then(|captures| captures.get(1))
+                .map(|capture| Self::trade_mark_symbols(capture.as_str().trim()))
+            else {
+                continue;
+            };
+
+            let parse_usize = |regex: &Regex| {
+                regex
+                    .captures(section)
+                    .and_then(|captures| captures.get(1))
+                    .and_then(|capture| capture.as_str().trim().parse::<usize>().ok())
+            };
+
+            // "Socket(s)" is "-" when the cores are grouped in clusters instead
+            let cores = parse_usize(&RE_LSCPU_CORES).map(|cores_per_group| {
+                cores_per_group.saturating_mul(
+                    parse_usize(&RE_LSCPU_SOCKETS)
+                        .or_else(|| parse_usize(&RE_LSCPU_CLUSTERS))
+                        .unwrap_or(1),
+                )
+            });
+
+            let max_speed = RE_LSCPU_MAX_MHZ
+                .captures(section)
+                .and_then(|captures| captures.get(1))
+                .and_then(|capture| capture.as_str().trim().parse::<f64>().ok())
+                .map(|mhz| mhz * 1_000_000.0);
+
+            if let Some(existing) = core_types.iter_mut().find(|existing| existing.name == name) {
+                existing.cores = existing.cores.zip(cores).map(|(a, b)| a + b);
+                existing.max_speed = match (existing.max_speed, max_speed) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+            } else {
+                core_types.push(CoreType {
+                    name,
+                    cores,
+                    max_speed,
+                });
+            }
+        }
+
+        core_types.sort_by(|a, b| {
+            b.max_speed
+                .partial_cmp(&a.max_speed)
+                .unwrap_or(Ordering::Equal)
+        });
+
+        core_types
     }
 
     fn trade_mark_symbols<S: AsRef<str>>(s: S) -> String {
@@ -411,5 +505,99 @@ mod test {
         };
 
         assert_eq!(parsed, expected)
+    }
+
+    // `LC_ALL=C lscpu` (util-linux 2.42) on a Rockchip RK3588 (Orange Pi 5B), trimmed
+    const LSCPU_OUTPUT_HETEROGENEOUS: &str = concat!(
+        "Architecture:                            aarch64\n",
+        "CPU op-mode(s):                          32-bit, 64-bit\n",
+        "Byte Order:                              Little Endian\n",
+        "CPU(s):                                  8\n",
+        "On-line CPU(s) list:                     0-7\n",
+        "Vendor ID:                               ARM\n",
+        "Model name:                              Cortex-A55\n",
+        "Model:                                   0\n",
+        "Thread(s) per core:                      1\n",
+        "Core(s) per socket:                      4\n",
+        "Socket(s):                               1\n",
+        "Stepping:                                r2p0\n",
+        "Frequency boost:                         disabled\n",
+        "CPU(s) scaling MHz:                      95%\n",
+        "CPU max MHz:                             1800.0000\n",
+        "CPU min MHz:                             1008.0000\n",
+        "BogoMIPS:                                48.00\n",
+        "Model name:                              Cortex-A76\n",
+        "Model:                                   0\n",
+        "Thread(s) per core:                      1\n",
+        "Core(s) per socket:                      4\n",
+        "Socket(s):                               1\n",
+        "Stepping:                                r4p0\n",
+        "CPU(s) scaling MHz:                      50%\n",
+        "CPU max MHz:                             2400.0000\n",
+        "CPU min MHz:                             1200.0000\n",
+        "BogoMIPS:                                48.00\n",
+        "L1d cache:                               384 KiB (8 instances)\n",
+        "L2 cache:                                2.5 MiB (8 instances)\n",
+        "L3 cache:                                3 MiB (1 instance)\n",
+        "NUMA node(s):                            1\n",
+    );
+
+    #[test]
+    fn lscpu_heterogeneous() {
+        let parsed = CpuInfo::parse_lscpu(LSCPU_OUTPUT_HETEROGENEOUS);
+
+        let expected = CpuInfo {
+            model_name: Some("4× Cortex-A76 + 4× Cortex-A55".into()),
+            architecture: Some("aarch64".into()),
+            logical_cpus: Some(8),
+            physical_cpus: Some(8),
+            sockets: Some(1),
+            virtualization: None,
+            max_speed: Some(2400000000.0),
+        };
+
+        assert_eq!(parsed, expected)
+    }
+
+    #[test]
+    fn lscpu_heterogeneous_clusters() {
+        // older util-linux versions group the cores in clusters instead of sockets
+        let lscpu_output = concat!(
+            "CPU(s):                   8\n",
+            "Vendor ID:                ARM\n",
+            "  Model name:             Cortex-A55\n",
+            "    Core(s) per cluster:  4\n",
+            "    Socket(s):            -\n",
+            "    Cluster(s):           1\n",
+            "    CPU max MHz:          1800.0000\n",
+            "  Model name:             Cortex-A76\n",
+            "    Core(s) per cluster:  2\n",
+            "    Socket(s):            -\n",
+            "    Cluster(s):           2\n",
+            "    CPU max MHz:          2400.0000\n",
+        );
+
+        let parsed = CpuInfo::parse_lscpu(lscpu_output);
+
+        assert_eq!(
+            parsed.model_name,
+            Some("4× Cortex-A76 + 4× Cortex-A55".into())
+        );
+        assert_eq!(parsed.physical_cpus, Some(8));
+        assert_eq!(parsed.sockets, None);
+        assert_eq!(parsed.max_speed, Some(2400000000.0));
+    }
+
+    #[test]
+    fn lscpu_bios_model_name_ignored() {
+        let lscpu_output = LSCPU_OUTPUT.replace(
+            "    CPU family:           1\n",
+            "    BIOS Model name:      Abacus 10 CPU @ 3.0GHz\n    CPU family:           1\n",
+        );
+
+        let parsed = CpuInfo::parse_lscpu(lscpu_output);
+
+        assert_eq!(parsed.model_name, Some("UIM® Abacus™ 10".into()));
+        assert_eq!(parsed.physical_cpus, Some(8));
     }
 }
