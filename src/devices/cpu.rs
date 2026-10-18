@@ -6,12 +6,24 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     path::{Path, PathBuf},
+    process::Command,
     sync::LazyLock,
 };
 
-use crate::utils::read_parsed;
+use crate::utils::{FLATPAK_SPAWN, IS_FLATPAK, read_parsed};
 
 const PROC_STAT: &str = "/proc/stat";
+
+const DEVICETREE_COMPATIBLE: &str = "/sys/firmware/devicetree/base/compatible";
+
+/// Devicetree vendor prefixes of SoC vendors whose SoC compatibles are their product names, e.g.
+/// "rockchip,rk3588" for the Rockchip RK3588
+const SOC_VENDORS: &[(&str, &str)] = &[
+    ("brcm", "Broadcom"),
+    ("mediatek", "MediaTek"),
+    ("qcom", "Qualcomm"),
+    ("rockchip", "Rockchip"),
+];
 
 const KNOWN_HWMONS: &[&str] = &["zenpower", "coretemp", "k10temp", "ibmpowernv"];
 
@@ -341,15 +353,65 @@ impl CpuInfo {
     /// Will return `Err` if the are problems during reading or parsing
     /// of the `lscpu` command
     pub fn get() -> Result<Self> {
-        String::from_utf8(
-            std::process::Command::new("lscpu")
+        let mut cpu_info = String::from_utf8(
+            Command::new("lscpu")
                 .env("LC_ALL", "C")
                 .output()
                 .context("unable to run lscpu, is util-linux installed?")?
                 .stdout,
         )
         .context("unable to parse lscpu output to UTF-8")
-        .map(Self::parse_lscpu)
+        .map(Self::parse_lscpu)?;
+
+        // SoCs are better known by their own name than by the names of their cores
+        if let Some(soc_name) = Self::devicetree_compatible()
+            .inspect_err(|e| trace!("Unable to read devicetree compatible: {e}"))
+            .ok()
+            .and_then(|compatible| Self::soc_name_from_compatible(&compatible))
+        {
+            debug!("Using SoC name {soc_name:?} as CPU name");
+            cpu_info.model_name = Some(soc_name);
+        }
+
+        Ok(cpu_info)
+    }
+
+    /// Reads the compatible list of the devicetree's root node, which only exists on devicetree
+    /// based systems such as Arm SoCs
+    fn devicetree_compatible() -> Result<String> {
+        if *IS_FLATPAK {
+            // Flatpak's sandbox doesn't expose /sys/firmware
+            let output = Command::new(FLATPAK_SPAWN)
+                .args(["--host", "cat", DEVICETREE_COMPATIBLE])
+                .output()?;
+
+            if !output.status.success() {
+                bail!("unable to read {DEVICETREE_COMPATIBLE} outside of Flatpak's sandbox");
+            }
+
+            Ok(String::from_utf8(output.stdout)?)
+        } else {
+            Ok(std::fs::read_to_string(DEVICETREE_COMPATIBLE)?)
+        }
+    }
+
+    /// Returns the SoC's name from the devicetree root node's NUL-separated compatible list, e.g.
+    /// "Rockchip RK3588S" for "xunlong,orangepi-5b\0rockchip,rk3588s\0". By convention, the list
+    /// goes from the most specific (the board) to the least specific entry (the SoC).
+    fn soc_name_from_compatible(compatible: &str) -> Option<String> {
+        let soc = compatible
+            .split('\0')
+            .map(str::trim)
+            .rfind(|entry| !entry.is_empty())?;
+
+        let (vendor, model) = soc.split_once(',')?;
+
+        let vendor_name = SOC_VENDORS
+            .iter()
+            .find(|(prefix, _)| *prefix == vendor)
+            .map(|(_, name)| name)?;
+
+        Some(format!("{vendor_name} {}", model.to_uppercase()))
     }
 }
 
@@ -586,6 +648,24 @@ mod test {
         assert_eq!(parsed.physical_cpus, Some(8));
         assert_eq!(parsed.sockets, None);
         assert_eq!(parsed.max_speed, Some(2400000000.0));
+    }
+
+    #[test]
+    fn soc_name_from_compatible() {
+        assert_eq!(
+            CpuInfo::soc_name_from_compatible("xunlong,orangepi-5b\0rockchip,rk3588s\0"),
+            Some("Rockchip RK3588S".into())
+        );
+        assert_eq!(
+            CpuInfo::soc_name_from_compatible("raspberrypi,5-model-b\0brcm,bcm2712\0"),
+            Some("Broadcom BCM2712".into())
+        );
+        // unknown vendors fall back to the lscpu model name
+        assert_eq!(
+            CpuInfo::soc_name_from_compatible("xunlong,orangepi-zero3\0allwinner,sun50i-h618\0"),
+            None
+        );
+        assert_eq!(CpuInfo::soc_name_from_compatible(""), None);
     }
 
     #[test]
