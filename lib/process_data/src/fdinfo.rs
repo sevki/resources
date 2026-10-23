@@ -213,9 +213,9 @@ fn drm_sizes(fdinfo: &Fdinfo, field_names: &[&str]) -> u64 {
             let captures = RE_DRM_SIZE.captures(fdinfo.content.get(*name)?)?;
             let size = captures.get(1)?.as_str().parse::<u64>().ok()?;
             let unit = match captures.get(2).map(|unit| unit.as_str()) {
-                Some("KiB") => 1 << 10,
-                Some("MiB") => 1 << 20,
-                Some("GiB") => 1 << 30,
+                Some("KiB") => 1024,
+                Some("MiB") => 1024 * 1024,
+                Some("GiB") => 1024 * 1024 * 1024,
                 _ => 1,
             };
             Some(size.saturating_mul(unit))

@@ -39,8 +39,6 @@ mod imp {
         #[template_child]
         pub temperature: TemplateChild<ResGraphBox>,
         #[template_child]
-        pub sensors: TemplateChild<adw::PreferencesGroup>,
-        #[template_child]
         pub power_usage: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub npu_clockspeed: TemplateChild<adw::ActionRow>,
@@ -58,8 +56,6 @@ mod imp {
         pub max_power_cap: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub link: TemplateChild<adw::ActionRow>,
-
-        pub hide_unavailable: Cell<bool>,
 
         #[property(get)]
         uses_meter: Cell<bool>,
@@ -105,7 +101,6 @@ mod imp {
                 npu_usage: Default::default(),
                 memory_usage: Default::default(),
                 temperature: Default::default(),
-                sensors: Default::default(),
                 power_usage: Default::default(),
                 npu_clockspeed: Default::default(),
                 tops: Default::default(),
@@ -115,7 +110,6 @@ mod imp {
                 driver_used: Default::default(),
                 max_power_cap: Default::default(),
                 link: Default::default(),
-                hide_unavailable: Default::default(),
                 uses_meter: Cell::new(true),
                 main_graph_color: glib::Bytes::from_static(&super::ResNPU::MAIN_GRAPH_COLOR),
                 icon: RefCell::new(ThemedIcon::new("npu-symbolic").into()),
@@ -236,8 +230,6 @@ impl ResNPU {
 
         imp.driver_used.set_subtitle(npu.driver());
 
-        imp.hide_unavailable.set(npu.hide_unavailable());
-
         if let Ok(model_name) = npu.name() {
             imp.set_tab_detail_string(&model_name);
         }
@@ -304,19 +296,6 @@ impl ResNPU {
         self.set_property("usage", usage_fraction.unwrap_or(0.0));
 
         set_subtitle_converted_maybe(link.as_ref(), Link::to_string, &imp.link);
-
-        if imp.hide_unavailable.get() {
-            imp.npu_usage.set_visible(usage_fraction.is_some());
-            imp.memory_usage.set_visible(used_memory.is_some());
-            imp.npu_clockspeed.set_visible(clock_speed.is_some());
-            imp.tops
-                .set_visible(curr_tops.is_some() || max_tops.is_some());
-            imp.memory_clockspeed.set_visible(vram_speed.is_some());
-            imp.power_usage.set_visible(power_usage.is_some());
-            imp.sensors.set_visible(temperature.is_some());
-            imp.max_power_cap.set_visible(power_cap_max.is_some());
-            imp.link.set_visible(link.is_some());
-        }
 
         self.set_tab_usage_labels(gpu_npu_usage_string(
             *usage_fraction,

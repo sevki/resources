@@ -131,10 +131,6 @@ pub trait NpuImpl {
         false
     }
 
-    fn hide_unavailable(&self) -> bool {
-        false
-    }
-
     fn name(&self) -> Result<String>;
     fn usage(&self) -> Result<f64>;
     fn used_memory(&self) -> Result<u64>;

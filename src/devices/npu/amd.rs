@@ -356,10 +356,6 @@ impl NpuImpl for AmdNpu {
         self.sources.fdinfo_memory
     }
 
-    fn hide_unavailable(&self) -> bool {
-        true
-    }
-
     fn name(&self) -> Result<String> {
         self.drm_name()
     }
