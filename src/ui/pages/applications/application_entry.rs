@@ -1,9 +1,10 @@
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::glib::{self};
 use log::trace;
 use process_data::Containerization;
 
 use crate::{
-    devices::app::{App, AppsContext},
+    devices::app::{App, AppActionMode, AppsContext},
     utils::i18n::i18n,
 };
 
@@ -84,6 +85,10 @@ mod imp {
         #[property(get = Self::symbolic)]
         #[allow(dead_code)]
         symbolic: Cell<bool>,
+
+        /// The action mode as determined by the business layer via `App::action_mode()`.
+        /// The view reads this; it must not re-derive it from other raw fields.
+        pub action_mode: Cell<AppActionMode>,
     }
 
     impl Default for ApplicationEntry {
@@ -109,6 +114,7 @@ mod imp {
                 running_since: Cell::new(None),
                 containerization: Cell::new(glib::GString::default()),
                 running_processes: Cell::new(0),
+                action_mode: Cell::new(AppActionMode::NoSelection),
             }
         }
     }
@@ -135,7 +141,7 @@ mod imp {
             let icon = self.icon.replace(ThemedIcon::new("generic-process").into());
             self.icon.set(icon.clone());
 
-            id.is_none() // this will be the case for System Processes
+            self.action_mode.get() == AppActionMode::InformationOnly
                 || icon
                     .downcast_ref::<ThemedIcon>()
                     .is_some_and(|themed_icon| {
@@ -208,6 +214,9 @@ impl ApplicationEntry {
     pub fn update(&self, app: &App, apps_context: &AppsContext) {
         trace!("Refreshing ApplicationEntry ({})…", app.display_name);
 
+        // Action mode comes from the business layer — view does not compute it.
+        self.imp().action_mode.set(app.action_mode());
+
         self.set_cpu_usage(app.cpu_time_ratio(apps_context));
         self.set_memory_usage(app.memory_usage(apps_context) as u64);
         self.set_swap_usage(app.swap_usage(apps_context) as u64);
@@ -224,5 +233,11 @@ impl ApplicationEntry {
         self.set_dec_usage(app.dec_usage(apps_context));
         self.set_gpu_mem_usage(app.gpu_mem_usage(apps_context));
         self.set_running_processes(app.running_processes() as u32);
+    }
+
+    /// Returns the action mode as set by the business layer.
+    /// Use this everywhere in the view — do not inspect `id()` or other raw fields.
+    pub fn action_mode(&self) -> AppActionMode {
+        self.imp().action_mode.get()
     }
 }
