@@ -408,7 +408,7 @@ impl ResApplications {
         let column_view = imp.column_view.borrow();
         let mut columns = imp.columns.borrow_mut();
 
-        columns.push(self.add_name_column(&column_view));
+        columns.push(Self::add_name_column(&column_view));
 
         columns.push(add_column!(
             this: self,
@@ -917,7 +917,7 @@ impl ResApplications {
         dialog.present(Some(&MainWindow::default()));
     }
 
-    fn add_name_column(&self, column_view: &ColumnView) -> ColumnViewColumn {
+    fn add_name_column(column_view: &ColumnView) -> ColumnViewColumn {
         let name_col_factory = gtk::SignalListItemFactory::new();
 
         let name_col =

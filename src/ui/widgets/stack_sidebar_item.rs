@@ -237,59 +237,53 @@ mod imp {
         ) {
             const ICON_SIZE: i32 = 12;
 
-            let has_icon_child = item_box
-                .first_child()
-                .map(|w| w.is::<gtk::Image>())
-                .unwrap_or(false);
+            let has_icon_child = item_box.first_child().is_some_and(|w| w.is::<gtk::Image>());
 
-            match icon_name {
-                Some((name, tooltip)) => {
-                    let icon = if has_icon_child {
-                        item_box
-                            .first_child()
-                            .unwrap()
-                            .downcast::<gtk::Image>()
-                            .unwrap()
-                    } else {
-                        while let Some(child) = item_box.first_child() {
-                            item_box.remove(&child);
-                        }
-                        let icon = gtk::Image::new();
-                        icon.set_pixel_size(ICON_SIZE);
-                        item_box.append(&icon);
-                        item_box.append(&gtk::Label::new(None));
-                        icon
-                    };
-
-                    if &icon.icon_name().unwrap_or_default() != name {
-                        icon.set_from_gicon(&ThemedIcon::new(name));
+            if let Some((name, tooltip)) = icon_name {
+                let icon = if has_icon_child {
+                    item_box
+                        .first_child()
+                        .unwrap()
+                        .downcast::<gtk::Image>()
+                        .unwrap()
+                } else {
+                    while let Some(child) = item_box.first_child() {
+                        item_box.remove(&child);
                     }
-                    item_box.set_tooltip_text(Some(tooltip));
+                    let icon = gtk::Image::new();
+                    icon.set_pixel_size(ICON_SIZE);
+                    item_box.append(&icon);
+                    item_box.append(&gtk::Label::new(None));
+                    icon
+                };
 
-                    let label = icon
-                        .next_sibling()
-                        .and_then(|w| w.downcast::<gtk::Label>().ok())
-                        .expect("icon should be followed by a label");
-                    label.set_label(label_text);
+                if &icon.icon_name().unwrap_or_default() != name {
+                    icon.set_from_gicon(&ThemedIcon::new(name));
                 }
-                None => {
-                    let label = if has_icon_child {
-                        while let Some(child) = item_box.first_child() {
-                            item_box.remove(&child);
-                        }
-                        let label = gtk::Label::new(None);
-                        item_box.append(&label);
-                        label
-                    } else if let Some(widget) = item_box.first_child() {
-                        widget.downcast::<gtk::Label>().expect("expected a label")
-                    } else {
-                        let lbl = gtk::Label::new(None);
-                        item_box.append(&lbl);
-                        lbl
-                    };
+                item_box.set_tooltip_text(Some(tooltip));
 
-                    label.set_label(label_text);
-                }
+                let label = icon
+                    .next_sibling()
+                    .and_then(|w| w.downcast::<gtk::Label>().ok())
+                    .expect("icon should be followed by a label");
+                label.set_label(label_text);
+            } else {
+                let label = if has_icon_child {
+                    while let Some(child) = item_box.first_child() {
+                        item_box.remove(&child);
+                    }
+                    let label = gtk::Label::new(None);
+                    item_box.append(&label);
+                    label
+                } else if let Some(widget) = item_box.first_child() {
+                    widget.downcast::<gtk::Label>().expect("expected a label")
+                } else {
+                    let lbl = gtk::Label::new(None);
+                    item_box.append(&lbl);
+                    lbl
+                };
+
+                label.set_label(label_text);
             }
         }
 

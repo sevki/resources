@@ -509,9 +509,7 @@ impl ResMemory {
     }
 
     fn fraction_or_zero(used: u64, total: u64) -> f64 {
-        NonZeroU64::new(total)
-            .map(|total| used as f64 / total.get() as f64)
-            .unwrap_or(0.0)
+        NonZeroU64::new(total).map_or(0.0, |total| used as f64 / total.get() as f64)
     }
 
     fn update_swap_device_graphs(&self, swap_devices: &[SwapDevice]) {

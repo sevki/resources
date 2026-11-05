@@ -342,7 +342,6 @@ impl ResProcesses {
         );
     }
 
-    /// Opens the context menu for the row that currently has the keyboard focus.
     pub fn show_context_menu_for_focus(&self) {
         let column_view = self.imp().column_view.borrow().clone();
 
@@ -467,7 +466,7 @@ impl ResProcesses {
         let column_view = imp.column_view.borrow();
         let mut columns = imp.columns.borrow_mut();
 
-        columns.push(self.add_name_column(&column_view));
+        columns.push(Self::add_name_column(&column_view));
 
         columns.push(add_column!(
             this: self,
@@ -1186,7 +1185,7 @@ impl ResProcesses {
         dialog.present(Some(&MainWindow::default()));
     }
 
-    fn add_name_column(&self, column_view: &ColumnView) -> ColumnViewColumn {
+    fn add_name_column(column_view: &ColumnView) -> ColumnViewColumn {
         let name_col_factory = gtk::SignalListItemFactory::new();
 
         let name_col =

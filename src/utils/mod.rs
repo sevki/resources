@@ -139,7 +139,7 @@ where
 
     content
         .parse::<T>()
-        .inspect(|_| trace!("Successfully read {path:?} to {type_name} → {content}",))
+        .inspect(|_| trace!("Successfully read {path:?} to {type_name} → {content}"))
         .inspect_err(|e| {
             trace!("Unable to parse {path:?} to {type_name} → {e}");
         })
@@ -207,7 +207,7 @@ impl FiniteOr for f32 {
 mod test {
     use core::f64;
     use pretty_assertions::assert_eq;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, primitive};
 
     use crate::utils::{FiniteOr, parse_uevent_contents};
 
@@ -329,7 +329,7 @@ mod test {
 
     #[test]
     fn finite_or_infinite_f32() {
-        let float: f32 = f32::INFINITY;
+        let float: f32 = primitive::f32::INFINITY;
 
         let maybe = float.finite_or(8.0);
 
@@ -338,7 +338,7 @@ mod test {
 
     #[test]
     fn finite_or_infinite_f64() {
-        let float: f64 = f64::INFINITY;
+        let float: f64 = primitive::f64::INFINITY;
 
         let maybe = float.finite_or(8.0);
 
@@ -365,7 +365,7 @@ mod test {
 
     #[test]
     fn finite_or_else_infinite_f32() {
-        let float: f32 = f32::INFINITY;
+        let float: f32 = primitive::f32::INFINITY;
 
         let maybe = float.finite_or_else(|_| f32::powi(2.0, 3));
 
@@ -374,7 +374,7 @@ mod test {
 
     #[test]
     fn finite_or_else_infinite_f64() {
-        let float: f64 = f64::INFINITY;
+        let float: f64 = primitive::f64::INFINITY;
 
         let maybe = float.finite_or_else(|_| f64::powi(2.0, 3));
 
@@ -401,7 +401,7 @@ mod test {
 
     #[test]
     fn finite_or_default_infinite_f32() {
-        let float: f32 = f32::INFINITY;
+        let float: f32 = primitive::f32::INFINITY;
 
         let maybe = float.finite_or_default();
 
@@ -410,7 +410,7 @@ mod test {
 
     #[test]
     fn finite_or_default_infinite_f64() {
-        let float: f64 = f64::INFINITY;
+        let float: f64 = primitive::f64::INFINITY;
 
         let maybe = float.finite_or_default();
 
