@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::LazyLock};
 
+use gtk::{glib, prelude::*};
 use process_data::Niceness;
 
 use crate::utils::i18n::pi18n;
@@ -58,8 +59,6 @@ macro_rules! add_column {
 
         let title_clone = $title.clone();
         factory.connect_setup(clone!(
-            #[weak(rename_to = this)]
-            $this,
             move |_factory, item| {
                 let item = item.downcast_ref::<gtk::ListItem>().unwrap();
 
@@ -79,8 +78,6 @@ macro_rules! add_column {
                 item.set_child(Some(&row));
 
                 add_column!(@bind item, $entry_type, $property, $value_type, row, $convert);
-
-                this.add_gestures(item);
             }
         ));
 
@@ -135,6 +132,44 @@ macro_rules! add_column {
             ))
             .build()
     };
+}
+
+pub fn add_context_menu_gesture<P: IsA<gtk::Widget>>(
+    column_view: &gtk::ColumnView,
+    page: &glib::WeakRef<P>,
+    list_item_at: impl Fn(&gtk::ColumnView, f64, f64) -> Option<gtk::ListItem> + 'static,
+    on_secondary_click: impl Fn(&P, u32, f32, f32) + 'static,
+) {
+    let column_view = column_view.clone();
+    let page = page.clone();
+
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gtk::gdk::BUTTON_SECONDARY);
+    let view = column_view.clone();
+    gesture.connect_pressed(move |gesture, _, x, y| {
+        let Some(item) = list_item_at(&view, x, y) else {
+            return;
+        };
+
+        let position = item.position();
+        if position == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+
+        let Some(page) = page.upgrade() else {
+            return;
+        };
+
+        let Some(point) = view.compute_point(&page, &gtk::graphene::Point::new(x as f32, y as f32))
+        else {
+            return;
+        };
+
+        on_secondary_click(&page, position, point.x(), point.y());
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+
+    column_view.add_controller(gesture);
 }
 
 pub static NICE_TO_LABEL: LazyLock<HashMap<Niceness, (String, u32)>> = LazyLock::new(|| {

@@ -36,31 +36,31 @@
     <section>
       <item>
         <attribute name="label" translatable="yes">End Process</attribute>
-        <attribute name="action">processes.context-end-process</attribute>
+        <attribute name="action">processes.end-process</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Kill Process</attribute>
-        <attribute name="action">processes.context-kill-process</attribute>
+        <attribute name="action">processes.kill-process</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Halt Process</attribute>
-        <attribute name="action">processes.context-halt-process</attribute>
+        <attribute name="action">processes.halt-process</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Continue Process</attribute>
-        <attribute name="action">processes.context-continue-process</attribute>
+        <attribute name="action">processes.continue-process</attribute>
       </item>
     </section>
     <section>
       <item>
         <attribute name="label" translatable="yes">Options</attribute>
-        <attribute name="action">processes.context-options</attribute>
+        <attribute name="action">processes.options</attribute>
       </item>
     </section>
     <section>
       <item>
         <attribute name="label" translatable="yes">Information</attribute>
-        <attribute name="action">processes.context-information</attribute>
+        <attribute name="action">processes.information</attribute>
       </item>
     </section>
   </menu>
