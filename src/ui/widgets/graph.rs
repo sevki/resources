@@ -98,7 +98,7 @@ mod imp {
 
             let root = backend.into_drawing_area();
 
-            root.fill(&self.graph_color.get().mix(0.1))?;
+            root.fill(&self.graph_color.get().mix(0.05))?;
 
             let y_max = self.max_y.get().unwrap_or_else(|| {
                 let max = *data_points
@@ -118,7 +118,7 @@ mod imp {
                     .configure_mesh()
                     .disable_axes()
                     .max_light_lines(0)
-                    .bold_line_style(color.mix(0.4))
+                    .bold_line_style(color)
                     .draw()?;
             }
 
@@ -128,7 +128,7 @@ mod imp {
                         .zip(data_points.range(start_point..(MAX_DATA_POINTS as usize)))
                         .map(|(x, y)| (f64::from(x), *y)),
                     0.0,
-                    color.mix(0.4),
+                    color.mix(0.15),
                 )
                 .border_style(color),
             )?;
