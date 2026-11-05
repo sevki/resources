@@ -12,7 +12,11 @@ use crate::utils::read_parsed;
 
 const PROC_STAT: &str = "/proc/stat";
 
-const KNOWN_HWMONS: &[&str] = &["zenpower", "coretemp", "k10temp", "ibmpowernv"];
+const CORE_TEMP_LABEL: &str = "core";
+
+const CPU_TEMP_LABEL: &str = "cpu";
+
+const KNOWN_HWMONS: &[&str] = &["zenpower", "coretemp", "k10temp", "ibmpowernv", "asusec"];
 
 const KNOWN_THERMAL_ZONES: &[&str] = &["cpu-thermal", "x86_pkg_temp", "acpitz"];
 
@@ -35,22 +39,24 @@ static RE_PROC_STAT: Lazy<Regex> = lazy_regex!(
 );
 
 static CPU_TEMPERATURE_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-    search_for_hwmons(KNOWN_HWMONS)
+    search_for_hwmons(KNOWN_HWMONS, CORE_TEMP_LABEL)
         .or_else(|| search_for_thermal_zones(KNOWN_THERMAL_ZONES))
+        .or_else(|| search_for_hwmons(KNOWN_HWMONS, CPU_TEMP_LABEL))
         .or_else(|| {
             warn!("No CPU temperature sensor found!");
             None
         })
 });
 
-fn search_for_cpu_temp<S: AsRef<str>>(base_path: S) -> Option<PathBuf> {
+fn search_for_cpu_temp<S: AsRef<str>>(base_path: S, temp_label: &str) -> Option<PathBuf> {
     let base = base_path.as_ref();
+    let temp_label = temp_label.to_lowercase();
 
     // First, try to find a sensor labeled as a CPU core (e.g. ibmpowernv
     // exposes "Chip N Core M" alongside DIMM and VRM sensors)
     for label_path in glob(&format!("{base}/temp*_label")).unwrap().flatten() {
         if let Ok(label) = read_parsed::<String>(&label_path)
-            && label.to_lowercase().contains("core")
+            && label.to_lowercase().contains(&temp_label)
         {
             let input_path = label_path.with_file_name(
                 label_path
@@ -73,7 +79,7 @@ fn search_for_cpu_temp<S: AsRef<str>>(base_path: S) -> Option<PathBuf> {
         .next()
 }
 
-fn search_for_hwmons(names: &[&'static str]) -> Option<PathBuf> {
+fn search_for_hwmons(names: &[&'static str], temp_label: &str) -> Option<PathBuf> {
     let mut hwmon_map = HashMap::new();
 
     trace!("Collecting hwmons for CPU temperature…");
@@ -83,7 +89,7 @@ fn search_for_hwmons(names: &[&'static str]) -> Option<PathBuf> {
         if let Ok(read_name) = read_parsed::<String>(path.join("name")) {
             let read_name = read_name.to_string();
             trace!("{path:?} is a hwmon for {read_name}");
-            if let Some(first_temp) = search_for_cpu_temp(path.to_string_lossy()) {
+            if let Some(first_temp) = search_for_cpu_temp(path.to_string_lossy(), temp_label) {
                 hwmon_map.insert(read_name, first_temp);
             }
         }
