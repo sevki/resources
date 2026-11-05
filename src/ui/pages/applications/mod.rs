@@ -291,6 +291,13 @@ impl ResApplications {
     }
 
     pub fn show_row_context_menu(&self, position: u32, x: f32, y: f32) {
+        self.show_row_context_menu_at(
+            position,
+            &gtk::gdk::Rectangle::new(x.round() as i32, y.round() as i32, 0, 0),
+        );
+    }
+
+    fn show_row_context_menu_at(&self, position: u32, rect: &gtk::gdk::Rectangle) {
         let imp = self.imp();
 
         let already_selected = imp.selection_model.borrow().is_selected(position);
@@ -303,15 +310,44 @@ impl ResApplications {
             );
         }
 
-        imp.popover_menu
-            .set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-                x.round() as i32,
-                y.round() as i32,
-                0,
-                0,
-            )));
+        imp.popover_menu.set_pointing_to(Some(rect));
 
         imp.popover_menu.popup();
+    }
+
+    pub fn show_context_menu_for_focus(&self) {
+        let column_view = self.imp().column_view.borrow().clone();
+
+        let Some(focus) = self.root().and_then(|root| root.focus()) else {
+            return;
+        };
+
+        if !focus.is_ancestor(&column_view) {
+            return;
+        }
+
+        let Some(item) = list_item_for_widget(focus.clone()) else {
+            return;
+        };
+
+        let position = item.position();
+        if position == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+
+        let Some(bounds) = focus.compute_bounds(self) else {
+            return;
+        };
+
+        self.show_row_context_menu_at(
+            position,
+            &gtk::gdk::Rectangle::new(
+                bounds.x().round() as i32,
+                bounds.y().round() as i32,
+                bounds.width().round() as i32,
+                bounds.height().round() as i32,
+            ),
+        );
     }
 
     pub fn setup_widgets(&self) {
@@ -937,7 +973,10 @@ impl ResApplications {
 
 fn list_item_at(column_view: &ColumnView, x: f64, y: f64) -> Option<ListItem> {
     let widget = column_view.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    list_item_for_widget(widget)
+}
 
+fn list_item_for_widget(widget: gtk::Widget) -> Option<ListItem> {
     let mut current = Some(widget);
     while let Some(w) = current {
         if let Some(item) = list_item_of(&w) {
