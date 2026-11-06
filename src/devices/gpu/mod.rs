@@ -2,11 +2,13 @@ mod amd;
 mod intel;
 mod nvidia;
 mod other;
+mod panthor;
 mod v3d;
 
 use anyhow::{Context, Result, bail};
 use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::{debug, info, trace};
+use panthor::PanthorGpu;
 use process_data::{gpu_usage::GpuIdentifier, pci_slot::PciSlot};
 use v3d::V3dGpu;
 
@@ -32,7 +34,8 @@ pub const VID_AMD: u16 = 0x1002;
 pub const VID_INTEL: u16 = 0x8086;
 pub const VID_NVIDIA: u16 = 0x10DE;
 
-const BLOCKLISTED_DRIVERS: &[&str] = &["simple-framebuffer", "evdi"];
+// rockchip-drm is the display controller of Rockchip SoCs, their actual GPU is a separate DRM device
+const BLOCKLISTED_DRIVERS: &[&str] = &["simple-framebuffer", "evdi", "rockchip-drm"];
 
 static RE_CARD_ENUMARATOR: Lazy<Regex> = lazy_regex!(r"(\d+)\/?$");
 
@@ -120,6 +123,7 @@ pub enum Gpu {
     Intel(IntelGpu),
     Nvidia(NvidiaGpu),
     V3d(V3dGpu),
+    Panthor(PanthorGpu),
     Other(OtherGpu),
 }
 
@@ -152,6 +156,15 @@ pub trait GpuImpl {
 
     // These are preimplemented ways of getting information through the DRM and hwmon interface.
     // It's also used as a fallback.
+
+    fn vendor_name(&self) -> Result<String> {
+        Ok(self
+            .device()
+            .context("no device")?
+            .vendor()
+            .name()
+            .to_owned())
+    }
 
     fn drm_name(&self) -> Result<String> {
         Ok(self.device().context("no device")?.name().to_owned())
@@ -212,6 +225,7 @@ impl std::ops::Deref for Gpu {
             Self::Intel(gpu) => gpu,
             Self::Nvidia(gpu) => gpu,
             Self::V3d(gpu) => gpu,
+            Self::Panthor(gpu) => gpu,
             Self::Other(gpu) => gpu,
         }
     }
@@ -335,6 +349,17 @@ impl Gpu {
                     hwmon_vec.first().cloned(),
                 )),
                 "v3d",
+            )
+        } else if driver == "panthor" {
+            (
+                Self::Panthor(PanthorGpu::new(
+                    device,
+                    gpu_identifier,
+                    driver,
+                    path.to_path_buf(),
+                    hwmon_vec.first().cloned(),
+                )),
+                "panthor",
             )
         } else {
             (

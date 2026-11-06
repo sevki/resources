@@ -245,10 +245,8 @@ impl ResGPU {
         imp.temperature.graph().set_graph_color(0xa5, 0x1d, 0x2d);
         imp.temperature.graph().set_locked_max_y(None);
 
-        imp.manufacturer.set_subtitle(
-            &gpu.get_vendor()
-                .map_or_else(|_| i18n("N/A"), |vendor| vendor.name().to_string()),
-        );
+        imp.manufacturer
+            .set_subtitle(&gpu.vendor_name().unwrap_or_else(|_| i18n("N/A")));
 
         match gpu.gpu_identifier() {
             GpuIdentifier::PciSlot(pci_slot) => {
