@@ -17,7 +17,7 @@ use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::{debug, info, trace};
 use process_data::{
     Containerization, ProcessData,
-    gpu_usage::{GpuIdentifier, GpuUsageStats},
+    gpu_usage::{GpuFractions, GpuIdentifier, GpuUsageAccumulator},
     pci_slot::PciSlot,
 };
 
@@ -26,6 +26,24 @@ use crate::utils::{boot_time, i18n::i18n, read_parsed, snapd};
 use futures::future::{FutureExt, LocalBoxFuture, Shared};
 
 use super::process::{Process, ProcessAction};
+
+fn gpu_fractions<'a>(
+    processes: impl Iterator<Item = &'a Process>,
+    gpu_filter: Option<GpuIdentifier>,
+) -> GpuFractions {
+    let mut usage = GpuUsageAccumulator::default();
+    for process in processes {
+        for (gpu, new) in &process.data.gpu_usage_stats {
+            if gpu_filter.is_some_and(|filter| filter != *gpu) {
+                continue;
+            }
+            if let Some(old) = process.gpu_usage_stats_last.get(gpu) {
+                usage.add(*gpu, new, old);
+            }
+        }
+    }
+    usage.fractions()
+}
 
 // This contains executable names that are blocklisted from being recognized as applications
 const DESKTOP_EXEC_BLOCKLIST: &[&str] = &["bash", "zsh", "fish", "sh", "ksh", "flatpak"];
@@ -563,17 +581,17 @@ impl App {
 
     #[must_use]
     pub fn gpu_usage(&self, apps: &AppsContext) -> f32 {
-        self.processes_iter(apps).map(Process::gpu_usage).sum()
+        gpu_fractions(self.processes_iter(apps), None).gfx
     }
 
     #[must_use]
     pub fn enc_usage(&self, apps: &AppsContext) -> f32 {
-        self.processes_iter(apps).map(Process::enc_usage).sum()
+        gpu_fractions(self.processes_iter(apps), None).enc
     }
 
     #[must_use]
     pub fn dec_usage(&self, apps: &AppsContext) -> f32 {
-        self.processes_iter(apps).map(Process::dec_usage).sum()
+        gpu_fractions(self.processes_iter(apps), None).dec
     }
 
     #[must_use]
@@ -633,92 +651,20 @@ impl AppsContext {
     }
 
     pub fn gpu_fraction(&self, gpu_identifier: GpuIdentifier) -> f32 {
-        self.processes_iter()
-            .map(|process| {
-                (
-                    &process.data.gpu_usage_stats,
-                    &process.gpu_usage_stats_last,
-                    process.data.timestamp,
-                    process.timestamp_last,
-                )
-            })
-            .map(|(new, old, timestamp, timestamp_last)| {
-                (
-                    new.get(&gpu_identifier),
-                    old.get(&gpu_identifier),
-                    timestamp,
-                    timestamp_last,
-                )
-            })
-            .filter_map(|(new, old, timestamp, timestamp_last)| match (new, old) {
-                (Some(new), Some(old)) => Some((new, old, timestamp, timestamp_last)),
-                _ => None,
-            })
-            .map(|(new, old, timestamp, timestamp_last)| {
-                let time_delta = timestamp.saturating_sub(timestamp_last);
-                new.gfx_fraction(old, time_delta).unwrap_or_default()
-            })
-            .sum::<f32>()
+        gpu_fractions(self.processes_iter(), Some(gpu_identifier))
+            .gfx
             .clamp(0.0, 1.0)
     }
 
     pub fn encoder_fraction(&self, gpu_identifier: GpuIdentifier) -> f32 {
-        self.processes_iter()
-            .map(|process| {
-                (
-                    &process.data.gpu_usage_stats,
-                    &process.gpu_usage_stats_last,
-                    process.data.timestamp,
-                    process.timestamp_last,
-                )
-            })
-            .map(|(new, old, timestamp, timestamp_last)| {
-                (
-                    new.get(&gpu_identifier),
-                    old.get(&gpu_identifier),
-                    timestamp,
-                    timestamp_last,
-                )
-            })
-            .filter_map(|(new, old, timestamp, timestamp_last)| match (new, old) {
-                (Some(new), Some(old)) => Some((new, old, timestamp, timestamp_last)),
-                _ => None,
-            })
-            .map(|(new, old, timestamp, timestamp_last)| {
-                let time_delta = timestamp.saturating_sub(timestamp_last);
-                new.enc_fraction(old, time_delta).unwrap_or_default()
-            })
-            .sum::<f32>()
+        gpu_fractions(self.processes_iter(), Some(gpu_identifier))
+            .enc
             .clamp(0.0, 1.0)
     }
 
     pub fn decoder_fraction(&self, gpu_identifier: GpuIdentifier) -> f32 {
-        self.processes_iter()
-            .map(|process| {
-                (
-                    &process.data.gpu_usage_stats,
-                    &process.gpu_usage_stats_last,
-                    process.data.timestamp,
-                    process.timestamp_last,
-                )
-            })
-            .map(|(new, old, timestamp, timestamp_last)| {
-                (
-                    new.get(&gpu_identifier),
-                    old.get(&gpu_identifier),
-                    timestamp,
-                    timestamp_last,
-                )
-            })
-            .filter_map(|(new, old, timestamp, timestamp_last)| match (new, old) {
-                (Some(new), Some(old)) => Some((new, old, timestamp, timestamp_last)),
-                _ => None,
-            })
-            .map(|(new, old, timestamp, timestamp_last)| {
-                let time_delta = timestamp.saturating_sub(timestamp_last);
-                new.dec_fraction(old, time_delta).unwrap_or_default()
-            })
-            .sum::<f32>()
+        gpu_fractions(self.processes_iter(), Some(gpu_identifier))
+            .dec
             .clamp(0.0, 1.0)
     }
 
@@ -771,7 +717,7 @@ impl AppsContext {
                     .data
                     .gpu_usage_stats
                     .get(&gpu_identifier)
-                    .and_then(process_data::gpu_usage::GpuUsageStats::mem)
+                    .and_then(process_data::gpu_usage::GpuClientSnapshots::mem)
             })
             .sum()
     }
@@ -997,7 +943,7 @@ impl AppsContext {
             updated_processes.insert(process_data.pid);
 
             // this is awkward: since AppsContext is the only object around that knows what GPUs have combined media
-            // engines, it is here where we have to manipulate the GpuUsageStats objects with PciSlots of those GPUs
+            // engines, it is here where we have to manipulate the GpuClientSnapshots objects with PciSlots of those GPUs
             // whose media engine is combined (i.e. no discrimination between enc and dec stats)
             process_data
                 .gpu_usage_stats
@@ -1006,10 +952,7 @@ impl AppsContext {
                 .for_each(|(pci_slot, stats)| {
                     trace!("Manually adjusting GPU stats of {} for {pci_slot} due to combined media engine", process_data.pid);
 
-                    if let GpuUsageStats::AmdgpuStats { gfx_ns: _, enc_ns, dec_ns, mem_bytes: _ } = stats {
-                        *enc_ns = u64::max(*enc_ns, *dec_ns);
-                        *dec_ns = u64::max(*enc_ns, *dec_ns);
-                    }
+                    stats.combine_media_engines();
                 });
 
             // refresh our old processes
@@ -1023,6 +966,11 @@ impl AppsContext {
                 old_process.timestamp_last = old_process.data.timestamp;
                 old_process.read_bytes_last = old_process.data.read_bytes;
                 old_process.write_bytes_last = old_process.data.write_bytes;
+                for (gpu, stats) in &mut process_data.gpu_usage_stats {
+                    if let Some(old) = old_process.data.gpu_usage_stats.get(gpu) {
+                        stats.retain_busy_high_water(old);
+                    }
+                }
                 old_process.gpu_usage_stats_last = old_process.data.gpu_usage_stats.clone();
                 old_process.npu_usage_stats_last = old_process.data.npu_usage_stats.clone();
 
