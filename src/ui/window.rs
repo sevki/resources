@@ -441,6 +441,18 @@ impl MainWindow {
         }
     }
 
+    pub fn shortcut_information_context_menu(&self) {
+        let imp = self.imp();
+
+        let selected_page = self.get_selected_page().unwrap();
+
+        if selected_page.is::<ResApplications>() {
+            imp.apps.show_context_menu_for_focus();
+        } else if selected_page.is::<ResProcesses>() {
+            imp.processes.show_context_menu_for_focus();
+        }
+    }
+
     pub fn shortcut_process_options(&self) {
         let imp = self.imp();
 

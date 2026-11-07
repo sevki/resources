@@ -20,25 +20,25 @@
     <section>
       <item>
         <attribute name="label" translatable="yes">End App</attribute>
-        <attribute name="action">applications.context-end-app</attribute>
+        <attribute name="action">applications.end-app</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Kill App</attribute>
-        <attribute name="action">applications.context-kill-app</attribute>
+        <attribute name="action">applications.kill-app</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Halt App</attribute>
-        <attribute name="action">applications.context-halt-app</attribute>
+        <attribute name="action">applications.halt-app</attribute>
       </item>
       <item>
         <attribute name="label" translatable="yes">Continue App</attribute>
-        <attribute name="action">applications.context-continue-app</attribute>
+        <attribute name="action">applications.continue-app</attribute>
       </item>
     </section>
     <section>
       <item>
         <attribute name="label" translatable="yes">Information</attribute>
-        <attribute name="action">applications.context-information</attribute>
+        <attribute name="action">applications.information</attribute>
       </item>
     </section>
   </menu>

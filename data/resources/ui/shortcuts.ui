@@ -28,6 +28,12 @@
             <property name="action-name">app.toggle-sidebar</property>
           </object>
         </child>
+        <child>
+          <object class="AdwShortcutsItem">
+            <property name="title" translatable="yes" context="shortcut window">Open Context Menu</property>
+            <property name="action-name">app.context-menu</property>
+          </object>
+        </child>
       </object>
     </child>
     <child>

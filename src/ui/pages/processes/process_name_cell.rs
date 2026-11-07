@@ -1,5 +1,5 @@
 use adw::{glib::property::PropertySet, prelude::*, subclass::prelude::*};
-use gtk::{gio::Icon, glib};
+use gtk::{ListItem, gio::Icon, glib};
 use log::trace;
 
 mod imp {
@@ -30,6 +30,7 @@ mod imp {
         icon: RefCell<Icon>,
         #[property(get, set = Self::set_symbolic)]
         symbolic: Cell<bool>,
+        pub list_item: glib::WeakRef<ListItem>,
     }
 
     impl Default for ResProcessNameCell {
@@ -41,6 +42,7 @@ mod imp {
                 tooltip: Default::default(),
                 icon: RefCell::new(ThemedIcon::new("generic-process").into()),
                 symbolic: Default::default(),
+                list_item: Default::default(),
             }
         }
     }
@@ -158,5 +160,13 @@ impl ResProcessNameCell {
         trace!("Creating ResProcessNameCell GObject…");
 
         glib::Object::new::<Self>()
+    }
+
+    pub fn set_list_item(&self, item: &ListItem) {
+        self.imp().list_item.set(Some(item));
+    }
+
+    pub fn list_item(&self) -> Option<ListItem> {
+        self.imp().list_item.upgrade()
     }
 }

@@ -11,7 +11,7 @@ use gtk::accessible::Property;
 use gtk::glib::{self, MainContext, Object, clone, closure};
 use gtk::{
     BitsetIter, ColumnView, ColumnViewColumn, EventControllerKey, FilterChange, ListItem,
-    NumericSorter, SortType, StringSorter, Widget, gio,
+    ListScrollFlags, NumericSorter, SortType, StringSorter, Widget, gio,
 };
 use process_data::Niceness;
 
@@ -42,7 +42,7 @@ static LONGEST_PRIORITY_LABEL: LazyLock<u32> = LazyLock::new(|| {
     let min_length = 4;
     let calulated = NICE_TO_LABEL
         .values()
-        .map(|(s, _)| s.len())
+        .map(|(s, _)| s.chars().count())
         .max()
         .unwrap_or(13) as u32;
 
@@ -116,8 +116,6 @@ mod imp {
 
         pub sender: OnceLock<Sender<Action>>,
 
-        pub popped_over_process: RefCell<Option<ProcessEntry>>,
-
         pub columns: RefCell<Vec<ColumnViewColumn>>,
 
         #[property(get)]
@@ -183,7 +181,6 @@ mod imp {
                 tab_detail_string: Cell::new(glib::GString::new()),
                 tab_usage_labels: Default::default(),
                 tab_id: Cell::new(glib::GString::from(TAB_ID)),
-                popped_over_process: Default::default(),
                 columns: Default::default(),
                 graph_locked_max_y: Cell::new(true),
                 primary_ord: Cell::new(PROCESSES_PRIMARY_ORD),
@@ -199,89 +196,17 @@ mod imp {
         type ParentType = adw::Bin;
 
         fn class_init(klass: &mut Self::Class) {
-            klass.install_action(
-                "processes.context-end-process",
-                None,
-                move |res_processes, _, _| {
-                    if let Some(process_entry) =
-                        res_processes.imp().popped_over_process.borrow().as_ref()
-                    {
-                        res_processes.open_process_action_dialog(
-                            vec![process_entry.clone()],
-                            ProcessAction::TERM,
-                        );
-                    }
-                },
-            );
+            klass.install_action("processes.information", None, move |res_processes, _, _| {
+                if let Some(process_entry) = res_processes.get_single_selected_process_entry() {
+                    res_processes.open_info_dialog(&process_entry);
+                }
+            });
 
-            klass.install_action(
-                "processes.context-kill-process",
-                None,
-                move |res_processes, _, _| {
-                    if let Some(process_entry) =
-                        res_processes.imp().popped_over_process.borrow().as_ref()
-                    {
-                        res_processes.open_process_action_dialog(
-                            vec![process_entry.clone()],
-                            ProcessAction::KILL,
-                        );
-                    }
-                },
-            );
-
-            klass.install_action(
-                "processes.context-halt-process",
-                None,
-                move |res_processes, _, _| {
-                    if let Some(process_entry) =
-                        res_processes.imp().popped_over_process.borrow().as_ref()
-                    {
-                        res_processes.open_process_action_dialog(
-                            vec![process_entry.clone()],
-                            ProcessAction::STOP,
-                        );
-                    }
-                },
-            );
-
-            klass.install_action(
-                "processes.context-continue-process",
-                None,
-                move |res_processes, _, _| {
-                    if let Some(process_entry) =
-                        res_processes.imp().popped_over_process.borrow().as_ref()
-                    {
-                        res_processes.open_process_action_dialog(
-                            vec![process_entry.clone()],
-                            ProcessAction::CONT,
-                        );
-                    }
-                },
-            );
-
-            klass.install_action(
-                "processes.context-information",
-                None,
-                move |res_processes, _, _| {
-                    if let Some(process_entry) =
-                        res_processes.imp().popped_over_process.borrow().as_ref()
-                    {
-                        res_processes.open_info_dialog(process_entry);
-                    }
-                },
-            );
-
-            klass.install_action(
-                "processes.context-options",
-                None,
-                move |res_processes, _, _| {
-                    if let Some(process_entry) =
-                        res_processes.imp().popped_over_process.borrow().as_ref()
-                    {
-                        res_processes.open_options_dialog(process_entry);
-                    }
-                },
-            );
+            klass.install_action("processes.options", None, move |res_processes, _, _| {
+                if let Some(process_entry) = res_processes.get_single_selected_process_entry() {
+                    res_processes.open_options_dialog(&process_entry);
+                }
+            });
 
             klass.install_action("processes.end-process", None, move |res_processes, _, _| {
                 let selected = res_processes.get_selected_process_entries();
@@ -354,6 +279,11 @@ mod imp {
         fn property(&self, id: usize, pspec: &ParamSpec) -> Value {
             self.derived_property(id, pspec)
         }
+
+        fn dispose(&self) {
+            self.popover_menu.unparent();
+            self.popover_menu_multiple.unparent();
+        }
     }
 
     impl WidgetImpl for ResProcesses {}
@@ -396,49 +326,88 @@ impl ResProcesses {
         self.setup_signals();
     }
 
-    fn add_gestures(&self, item: &ListItem) {
-        let widget = item.child().unwrap();
+    fn add_context_menu_gesture(&self, column_view: &ColumnView) {
+        crate::ui::pages::add_context_menu_gesture(
+            column_view,
+            &self.downgrade(),
+            list_item_at,
+            |page, position, x, y| page.show_row_context_menu(position, x, y),
+        );
+    }
 
-        let secondary_click = gtk::GestureClick::new();
-        secondary_click.set_button(3);
-        secondary_click.connect_released(clone!(
-            #[weak]
-            widget,
-            #[weak]
-            item,
-            #[weak(rename_to = this)]
-            self,
-            move |_, _, x, y| {
-                if let Some(entry) = item.item().and_downcast::<ProcessEntry>() {
-                    let imp = this.imp();
+    pub fn show_row_context_menu(&self, position: u32, x: f32, y: f32) {
+        self.show_row_context_menu_at(
+            position,
+            &gtk::gdk::Rectangle::new(x.round() as i32, y.round() as i32, 0, 0),
+        );
+    }
 
-                    let selected = this.get_selected_process_entries();
+    pub fn show_context_menu_for_focus(&self) {
+        let column_view = self.imp().column_view.borrow().clone();
 
-                    let popover_menu = if selected.len() > 1 {
-                        &imp.popover_menu_multiple
-                    } else {
-                        &imp.popover_menu
-                    };
+        let Some(focus) = self.root().and_then(|root| root.focus()) else {
+            return;
+        };
 
-                    *imp.popped_over_process.borrow_mut() = Some(entry);
+        if !focus.is_ancestor(&column_view) {
+            return;
+        }
 
-                    let position = widget
-                        .compute_point(&this, &gtk::graphene::Point::new(x as _, y as _))
-                        .unwrap();
+        let Some(item) = list_item_for_widget(focus.clone()) else {
+            return;
+        };
 
-                    popover_menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-                        position.x().round() as i32,
-                        position.y().round() as i32,
-                        0,
-                        0,
-                    )));
+        let position = item.position();
+        if position == gtk::INVALID_LIST_POSITION {
+            return;
+        }
 
-                    popover_menu.popup();
-                }
-            }
-        ));
+        let Some(bounds) = focus.compute_bounds(self) else {
+            return;
+        };
 
-        widget.add_controller(secondary_click);
+        self.show_row_context_menu_at(
+            position,
+            &gtk::gdk::Rectangle::new(
+                bounds.x().round() as i32,
+                bounds.y().round() as i32,
+                bounds.width().round() as i32,
+                bounds.height().round() as i32,
+            ),
+        );
+    }
+
+    fn show_row_context_menu_at(&self, position: u32, rect: &gtk::gdk::Rectangle) {
+        let imp = self.imp();
+
+        let already_selected = imp.selection_model.borrow().is_selected(position);
+        if !already_selected {
+            imp.column_view.borrow().scroll_to(
+                position,
+                None::<&ColumnViewColumn>,
+                ListScrollFlags::FOCUS | ListScrollFlags::SELECT,
+                None,
+            );
+        }
+
+        let popover_menu = if self.get_selected_process_entries().len() > 1 {
+            &imp.popover_menu_multiple
+        } else {
+            &imp.popover_menu
+        };
+
+        popover_menu.set_pointing_to(Some(rect));
+
+        popover_menu.popup();
+    }
+
+    fn get_single_selected_process_entry(&self) -> Option<ProcessEntry> {
+        let mut selected = self.get_selected_process_entries();
+        if selected.len() == 1 {
+            selected.pop()
+        } else {
+            None
+        }
     }
 
     pub fn setup_widgets(&self) {
@@ -488,6 +457,8 @@ impl ResProcesses {
         *imp.filter_model.borrow_mut() = filter_model;
 
         imp.processes_scrolled_window.set_child(Some(&*column_view));
+
+        self.add_context_menu_gesture(&column_view);
     }
 
     fn setup_columns(&self) {
@@ -495,7 +466,7 @@ impl ResProcesses {
         let column_view = imp.column_view.borrow();
         let mut columns = imp.columns.borrow_mut();
 
-        columns.push(self.add_name_column(&column_view));
+        columns.push(Self::add_name_column(&column_view));
 
         columns.push(add_column!(
             this: self,
@@ -1083,8 +1054,6 @@ impl ResProcesses {
                     AdwDialogExt::close(dialog);
                     *options_dialog_opt = None;
                 }
-                *imp.popped_over_process.borrow_mut() = None;
-                imp.popover_menu.set_visible(false);
                 pids_to_remove.insert(item_pid);
             }
         });
@@ -1117,6 +1086,8 @@ impl ResProcesses {
             imp.information_button.set_sensitive(false);
             imp.options_button.set_sensitive(false);
             imp.end_process_button.set_sensitive(false);
+            imp.popover_menu.popdown();
+            imp.popover_menu_multiple.popdown();
         }
 
         self.set_tab_usage_labels(UsageLabels::single_without_icon(i18n_f(
@@ -1214,7 +1185,7 @@ impl ResProcesses {
         dialog.present(Some(&MainWindow::default()));
     }
 
-    fn add_name_column(&self, column_view: &ColumnView) -> ColumnViewColumn {
+    fn add_name_column(column_view: &ColumnView) -> ColumnViewColumn {
         let name_col_factory = gtk::SignalListItemFactory::new();
 
         let name_col =
@@ -1224,35 +1195,31 @@ impl ResProcesses {
 
         name_col.set_expand(true);
 
-        name_col_factory.connect_setup(clone!(
-            #[weak(rename_to = this)]
-            self,
-            move |_factory, item| {
-                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        name_col_factory.connect_setup(clone!(move |_factory, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
 
-                let row = ResProcessNameCell::new();
+            let row = ResProcessNameCell::new();
 
-                item.set_child(Some(&row));
+            item.set_child(Some(&row));
 
-                item.property_expression("item")
-                    .chain_property::<ProcessEntry>("name")
-                    .bind(&row, "name", Widget::NONE);
+            row.set_list_item(item);
 
-                item.property_expression("item")
-                    .chain_property::<ProcessEntry>("icon")
-                    .bind(&row, "icon", Widget::NONE);
+            item.property_expression("item")
+                .chain_property::<ProcessEntry>("name")
+                .bind(&row, "name", Widget::NONE);
 
-                item.property_expression("item")
-                    .chain_property::<ProcessEntry>("commandline")
-                    .bind(&row, "tooltip", Widget::NONE);
+            item.property_expression("item")
+                .chain_property::<ProcessEntry>("icon")
+                .bind(&row, "icon", Widget::NONE);
 
-                item.property_expression("item")
-                    .chain_property::<ProcessEntry>("symbolic")
-                    .bind(&row, "symbolic", Widget::NONE);
+            item.property_expression("item")
+                .chain_property::<ProcessEntry>("commandline")
+                .bind(&row, "tooltip", Widget::NONE);
 
-                this.add_gestures(item);
-            }
-        ));
+            item.property_expression("item")
+                .chain_property::<ProcessEntry>("symbolic")
+                .bind(&row, "symbolic", Widget::NONE);
+        }));
 
         name_col_factory.connect_teardown(move |_factory, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
@@ -1274,6 +1241,49 @@ impl ResProcesses {
 
         name_col
     }
+}
+
+fn list_item_at(column_view: &ColumnView, x: f64, y: f64) -> Option<ListItem> {
+    let widget = column_view.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    list_item_for_widget(widget)
+}
+
+fn list_item_for_widget(widget: gtk::Widget) -> Option<ListItem> {
+    let mut current = Some(widget);
+    while let Some(w) = current {
+        if let Some(item) = list_item_of(&w) {
+            return Some(item);
+        }
+
+        let Some(parent) = w.parent() else { break };
+        if parent.is::<gtk::ListView>() {
+            return list_item_in_subtree(&w);
+        }
+        current = Some(parent);
+    }
+
+    None
+}
+
+fn list_item_in_subtree(root: &gtk::Widget) -> Option<ListItem> {
+    let mut stack = vec![root.clone()];
+    while let Some(w) = stack.pop() {
+        if let Some(item) = list_item_of(&w) {
+            return Some(item);
+        }
+
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            stack.push(c.clone());
+            child = c.next_sibling();
+        }
+    }
+
+    None
+}
+
+fn list_item_of(widget: &gtk::Widget) -> Option<ListItem> {
+    widget.downcast_ref::<ResProcessNameCell>()?.list_item()
 }
 
 fn get_action_name(action: ProcessAction, name: &str) -> String {

@@ -226,6 +226,17 @@ impl Application {
             }
         ));
         self.add_action(&action_toggle_sidebar);
+
+        // Open Context Menu
+        let action_toggle_sidebar = gio::SimpleAction::new("context-menu", None);
+        action_toggle_sidebar.connect_activate(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_, _| {
+                this.main_window().shortcut_information_context_menu();
+            }
+        ));
+        self.add_action(&action_toggle_sidebar);
     }
 
     // Sets up keyboard shortcuts
@@ -240,6 +251,7 @@ impl Application {
         self.set_accels_for_action("app.information-app-process", &["<Control>I"]);
         self.set_accels_for_action("app.process-options", &["<Control>O"]);
         self.set_accels_for_action("app.toggle-sidebar", &["F9"]);
+        self.set_accels_for_action("app.context-menu", &["<Shift>F10"]);
     }
 
     fn setup_css(&self) {
