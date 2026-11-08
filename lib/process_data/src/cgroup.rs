@@ -1,7 +1,7 @@
 use lazy_regex::{Lazy, Regex, lazy_regex};
 
 static RE_CGROUP: Lazy<Regex> = lazy_regex!(
-    r"(?U)/(?:app|background)\.slice/(?:app-|dbus-:)(?:(?P<launcher>[^-]+)-)?(?P<cgroup>[^-]+)(?:-[0-9]+|@[0-9]+)?\.(?:scope|service)"
+    r"(?U)/(?:app|background)\.slice/(?:[^/]+/)*(?:app-|dbus-:)(?:(?P<launcher>[^-]+)-)?(?P<cgroup>[^-]+)(?:-[0-9]+|@[0-9]+)?\.(?:scope|service)"
 );
 
 /* The cgroup of a snap process is composed of: `snap.<snap-name>.<app-name>-<uuid>.scope`
