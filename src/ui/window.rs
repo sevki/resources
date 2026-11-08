@@ -722,15 +722,19 @@ impl MainWindow {
          * Npu
          */
         let npu_pages = imp.npu_pages.borrow();
-        for ((_, page), mut npu_data) in npu_pages.values().zip(npu_data) {
+        for ((npu, page), mut npu_data) in npu_pages.values().zip(npu_data) {
             let page = page.content().and_downcast::<ResNPU>().unwrap();
 
             let processes_npu_fraction = apps_context.npu_fraction(npu_data.pci_slot);
-            if let Some(usage) = npu_data.usage_fraction {
+            if npu.busy_time_per_client() && !ARGS.disable_process_monitoring {
+                npu_data.usage_fraction = Some(processes_npu_fraction.into());
+            } else if let Some(usage) = npu_data.usage_fraction {
                 npu_data.usage_fraction = Some(f64::max(usage, processes_npu_fraction.into()));
             }
 
-            if npu_data.total_memory.is_some() {
+            if npu.memory_per_client() && !ARGS.disable_process_monitoring {
+                npu_data.used_memory = Some(apps_context.npu_mem(npu_data.pci_slot));
+            } else if npu_data.total_memory.is_some() {
                 let processes_npu_memory_fraction = apps_context.npu_mem(npu_data.pci_slot);
                 npu_data.used_memory = Some(u64::max(
                     npu_data.used_memory.unwrap_or(0),

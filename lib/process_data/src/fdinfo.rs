@@ -8,14 +8,17 @@ use lazy_regex::{Lazy, Regex, lazy_regex};
 use log::trace;
 
 use crate::gpu_usage::{GpuIdentifier, GpuUsageStats};
-use crate::npu_usage::NpuUsageStats;
+use crate::npu_usage::{
+    AMDXDNA_BUSY_FIELDS, AMDXDNA_MEMORY_FIELDS, AMDXDNA_TOTAL_MEMORY_FIELD, NpuUsageStats,
+};
 use crate::pci_slot::PciSlot;
 use crate::util::read_parsed;
 
 const DRM_DRIVER: &str = "drm-driver";
 const DRM_PDEV: &str = "drm-pdev";
 
-static RE_DRM_KIB: Lazy<Regex> = lazy_regex!(r"(\d+)\s*KiB");
+// drm_fdinfo_print_size() prints bytes, KiB or MiB
+static RE_DRM_SIZE: Lazy<Regex> = lazy_regex!(r"(\d+)\s*([KMG]iB)?");
 static RE_DRM_TIME: Lazy<Regex> = lazy_regex!(r"(\d+)\s*ns");
 static RE_DRM_UNITS: Lazy<Regex> = lazy_regex!(r"(\d+)");
 
@@ -56,12 +59,12 @@ static DEC_NS_DRM_FIELDS: Lazy<HashMap<&str, Vec<&str>>> =
     Lazy::new(|| HashMap::from_iter([("amdgpu", vec!["drm-engine-dec"])]));
 
 static NPU_NS_FIELDS: Lazy<HashMap<&str, Vec<&str>>> =
-    Lazy::new(|| HashMap::from_iter([("amdxdna_accel_driver", vec!["drm-engine-npu-amdxdna"])]));
+    Lazy::new(|| HashMap::from_iter([("amdxdna_accel_driver", AMDXDNA_BUSY_FIELDS.to_vec())]));
 
 static MEM_DRM_FIELDS: Lazy<HashMap<&str, Vec<&str>>> = Lazy::new(|| {
     HashMap::from_iter([
         ("amdgpu", vec!["drm-memory-gtt", "drm-memory-vram"]),
-        ("amdxdna_accel_driver", vec!["drm-total-memory"]),
+        ("amdxdna_accel_driver", vec![AMDXDNA_TOTAL_MEMORY_FIELD]),
         ("i915", vec!["drm-total-local0", "drm-total-system0"]),
         ("v3d", vec!["drm-total-memory"]),
         ("xe", vec!["drm-total-gtt", "drm-total-vram0"]),
@@ -90,7 +93,6 @@ pub fn collect_fdinfos(
     pid: libc::pid_t,
     non_gpu_fdinfos: &mut HashSet<FdKey>,
     non_npu_fdinfos: &mut HashSet<FdKey>,
-    symlink_cache: &mut HashMap<FdKey, PathBuf>,
 ) -> Result<Vec<Fdinfo>> {
     let fdinfo_dir = PathBuf::from(format!("/proc/{pid}/fdinfo"));
     let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
@@ -112,14 +114,8 @@ pub fn collect_fdinfos(
         let is_cached_non_gpu = non_gpu_fdinfos.contains(&(pid, fd_num));
         let is_cached_non_npu = non_npu_fdinfos.contains(&(pid, fd_num));
 
-        let fd_symlink = fd_dir.join(fd_num.to_string());
-        let symlink_target = {
-            if let Some(cached_target) = symlink_cache.get(&(pid, fd_num)) {
-                Some(cached_target.clone())
-            } else {
-                std::fs::read_link(&fd_symlink).ok()
-            }
-        };
+        // not cached: a process may close a file and reuse its fd number for a GPU or NPU
+        let symlink_target = std::fs::read_link(fd_dir.join(fd_num.to_string())).ok();
 
         if is_cached_non_gpu && is_cached_non_npu {
             if let Some(ref target) = symlink_target {
@@ -148,7 +144,6 @@ pub fn collect_fdinfos(
                 continue;
             }
             seen_targets.insert(target.clone(), fd_num);
-            symlink_cache.insert((pid, fd_num), target.clone());
         }
 
         trace!("fdinfo passed all checks, reading and parsing…");
@@ -203,11 +198,40 @@ fn drm_field<T: FromStr + Sum + Default>(
         .unwrap_or_default()
 }
 
+fn drm_sizes(fdinfo: &Fdinfo, field_names: &[&str]) -> u64 {
+    field_names
+        .iter()
+        .filter_map(|name| {
+            let captures = RE_DRM_SIZE.captures(fdinfo.content.get(*name)?)?;
+            let size = captures.get(1)?.as_str().parse::<u64>().ok()?;
+            let unit = match captures.get(2).map(|unit| unit.as_str()) {
+                Some("KiB") => 1024,
+                Some("MiB") => 1024 * 1024,
+                Some("GiB") => 1024 * 1024 * 1024,
+                _ => 1,
+            };
+            Some(size.saturating_mul(unit))
+        })
+        .sum()
+}
+
 fn drm_mem_bytes(driver: &str, fdinfo: &Fdinfo) -> u64 {
     MEM_DRM_FIELDS
         .get(driver)
-        .map(|names| parse_drm_fields::<u64, _>(fdinfo, names, &RE_DRM_KIB).saturating_mul(1024))
+        .map(|names| drm_sizes(fdinfo, names))
         .unwrap_or_default()
+}
+
+fn amdxdna_mem_bytes(fdinfo: &Fdinfo) -> u64 {
+    // drivers before 2026-03 only have drm-total-memory
+    if AMDXDNA_MEMORY_FIELDS
+        .iter()
+        .any(|name| fdinfo.content.contains_key(*name))
+    {
+        drm_sizes(fdinfo, &AMDXDNA_MEMORY_FIELDS)
+    } else {
+        drm_mem_bytes("amdxdna_accel_driver", fdinfo)
+    }
 }
 
 fn extract_gpu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(GpuIdentifier, GpuUsageStats)> {
@@ -281,7 +305,7 @@ fn extract_npu_usage_from_fdinfo(fdinfo: &Fdinfo) -> Result<(PciSlot, NpuUsageSt
     let stats = match driver.as_str() {
         "amdxdna_accel_driver" => NpuUsageStats::AmdxdnaStats {
             usage_ns: drm_field(driver, &NPU_NS_FIELDS, fdinfo, &RE_DRM_TIME),
-            mem_bytes: drm_mem_bytes(driver, fdinfo),
+            mem_bytes: amdxdna_mem_bytes(fdinfo),
         },
         _ => bail!("unable to read stats from driver"),
     };
@@ -349,4 +373,59 @@ pub fn npu_usage_stats(
     }
 
     return_map
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Fdinfo, extract_npu_usage_from_fdinfo, parse_fdinfo};
+    use crate::npu_usage::NpuUsageStats;
+    use pretty_assertions::assert_eq;
+
+    fn npu_stats(content: &str) -> NpuUsageStats {
+        let fdinfo = Fdinfo {
+            pid: 1,
+            fdinfo_num: 3,
+            content: parse_fdinfo(content),
+        };
+        extract_npu_usage_from_fdinfo(&fdinfo).unwrap().1
+    }
+
+    #[test]
+    fn amdxdna_stats() {
+        let stats = npu_stats(
+            "drm-driver:\tamdxdna_accel_driver\n\
+             drm-pdev:\t0000:c5:00.1\n\
+             drm-engine-amdxdna_accel_driver:\t1075280385 ns\n\
+             amdxdna_accel_driver-heap-alloc:\t524 KiB\n\
+             amdxdna_accel_driver-internal-alloc:\t65540 KiB\n\
+             amdxdna_accel_driver-external-alloc:\t53 MiB\n\
+             drm-total-memory:\t120320 KiB\n\
+             drm-shared-memory:\t0\n",
+        );
+        assert_eq!(
+            stats,
+            NpuUsageStats::AmdxdnaStats {
+                usage_ns: 1_075_280_385,
+                mem_bytes: (65540 << 10) + (53 << 20),
+            }
+        );
+    }
+
+    #[test]
+    fn amdxdna_legacy_stats() {
+        let stats = npu_stats(
+            "drm-driver:\tamdxdna_accel_driver\n\
+             drm-pdev:\t0000:c5:00.1\n\
+             drm-engine-npu-amdxdna:\t5000 ns\n\
+             drm-total-memory:\t64 MiB\n\
+             drm-shared-memory:\t0\n",
+        );
+        assert_eq!(
+            stats,
+            NpuUsageStats::AmdxdnaStats {
+                usage_ns: 5000,
+                mem_bytes: 64 << 20,
+            }
+        );
+    }
 }

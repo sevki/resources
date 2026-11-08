@@ -277,23 +277,23 @@ impl ResNPU {
 
         set_subtitle_converted_maybe(*clock_speed, convert_frequency, &imp.npu_clockspeed);
 
-        if let (Some(curr_tops), Some(max_tops)) = (curr_tops, max_tops) {
-            imp.tops.set_subtitle(&format!(
+        let tops_string = match (curr_tops, max_tops) {
+            (Some(curr_tops), Some(max_tops)) => format!(
                 "{} / {}",
                 convert_tops(*curr_tops as f64),
                 convert_tops(*max_tops as f64)
-            ));
-        } else {
-            imp.tops.set_subtitle(&i18n("N/A"));
-        }
+            ),
+            (Some(curr_tops), None) => convert_tops(*curr_tops as f64),
+            _ => i18n("N/A"),
+        };
 
-        set_subtitle_converted_maybe(*vram_speed, convert_frequency, &imp.npu_clockspeed);
+        imp.tops.set_subtitle(&tops_string);
+
+        set_subtitle_converted_maybe(*vram_speed, convert_frequency, &imp.memory_clockspeed);
 
         set_subtitle_converted_maybe(*power_cap_max, convert_power, &imp.max_power_cap);
 
         self.set_property("usage", usage_fraction.unwrap_or(0.0));
-
-        imp.temperature.add_temperature_point(*temperature);
 
         set_subtitle_converted_maybe(link.as_ref(), Link::to_string, &imp.link);
 
