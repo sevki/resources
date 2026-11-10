@@ -5,7 +5,7 @@
 # Juliano de Souza Camargo <julianosc@pm.me>, 2025-2026.
 # Luiggi R. Cardoso <luiggicardoso@outlook.com>, 2026.
 # Rafael Fontenelle <rafaelff@gnome.org>, 2026.
-# Álvaro Burns <>, 2026.
+# Álvaro Burns <(null)>, 2026.
 #
 msgid ""
 msgstr ""
@@ -13,7 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: https://gitlab.gnome.org/GNOME/Incubator/resources/"
 "issues/\n"
 "POT-Creation-Date: 2026-10-16 17:39+0000\n"
-"PO-Revision-Date: 2026-10-13 07:34-0300\n"
+"PO-Revision-Date: 2026-11-07 08:04-0300\n"
 "Last-Translator: Álvaro Burns <\n"
 "Language-Team: Brazilian Portuguese <https://br.gnome.org/traducao/>\n"
 "Language: pt_BR\n"
@@ -48,20 +48,12 @@ msgid "System;Resources;Monitor;Processes;Usage;Task;Manager;CPU;RAM;Memory;GPU;
 msgstr "Sistema;Resources;Recursos;Monitor;Processos;Uso;Tarefas;Gerenciador;CPU;RAM;Memória;GPU;Bateria;"
 
 #: data/org.gnome.Resources.metainfo.xml.in.in:17
-#, fuzzy
-#| msgid ""
-#| "Resources allows you to check the utilization of your system resources "
-#| "and control your running processes and apps. It’s designed to be user-"
-#| "friendly and feel right at home on a modern desktop by using GNOME’s "
-#| "libadwaita."
 msgid ""
 "Resources allows you to check the utilization of your system resources and "
 "control your running processes and apps."
 msgstr ""
 "Recursos permite que você verifique a utilização dos recursos do seu sistema "
-"e controle os processos e aplicativos em execução. É projetado para ter uma "
-"interface amigável e se encaixar em um desktop moderno, usando Libadwaita do "
-"GNOME."
+"e controle os processos e aplicativos em execução."
 
 #: data/org.gnome.Resources.metainfo.xml.in.in:20
 msgid "Resources supports monitoring the following components:"
