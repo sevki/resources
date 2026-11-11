@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # Formatting and unit tests. Ubuntu 24.04 ships libadwaita 1.5 only, so the
+  # version pins are relaxed with build-aux/ci-compat-libadwaita.sh; the
+  # Flatpak job below builds against the real libadwaita.
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/apt-install
+        with:
+          packages: >-
+            libgtk-4-dev libadwaita-1-dev libsoup-3.0-dev libudev-dev libdrm-dev libgudev-1.0-dev meson ninja-build gettext appstream desktop-file-utils libglib2.0-dev-bin blueprint-compiler
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            lib/process_data/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'lib/process_data/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all --check
+          cargo fmt --check --manifest-path lib/process_data/Cargo.toml
+
+      - name: Relax libadwaita pin for Ubuntu
+        run: build-aux/ci-compat-libadwaita.sh
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Test process_data
+        run: cargo test
+        working-directory: lib/process_data
+
+  # Starts the real app in a private X server and compares screenshots of
+  # deterministic UI against tests/screenshots/golden. Screenshots (and diffs
+  # on failure) are always uploaded; to update the goldens, run
+  # `tests/screenshots/run.sh --prefix <prefix> --update` or copy the
+  # screenshots from the artifact of a run on main.
+  screenshots:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/apt-install
+        with:
+          packages: >-
+            libgtk-4-dev libadwaita-1-dev libsoup-3.0-dev libudev-dev libdrm-dev libgudev-1.0-dev meson ninja-build gettext appstream desktop-file-utils libglib2.0-dev-bin blueprint-compiler adwaita-icon-theme fonts-dejavu-core xvfb xdotool imagemagick dbus-x11
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/cargo
+          key: cargo-screenshots-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-screenshots-${{ runner.os }}-
+
+      - name: Relax libadwaita pin for Ubuntu
+        run: build-aux/ci-compat-libadwaita.sh
+
+      - name: Build and install
+        run: |
+          meson setup build -Dprofile=dev -Dprefix="$PWD/install"
+          ninja -C build install
+
+      - name: Screenshot tests
+        run: tests/screenshots/run.sh --prefix "$PWD/install" --out screenshots-out
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots-out
+          if-no-files-found: warn
+
+  # The real build: Flatpak against the GNOME runtime the project targets.
+  # The bundle is available as a workflow artifact.
+  flatpak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      # The project manifest builds against the GNOME nightly runtime
+      # ("master"); CI uses the latest stable runtime that has a container
+      # image instead.
+      - name: Pin runtime version
+        run: |
+          sed 's/"runtime-version": "master"/"runtime-version": "51"/' \
+            build-aux/org.gnome.Resources.Devel.json > build-aux/org.gnome.Resources.Devel.ci.json
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: resources-devel.flatpak
+          manifest-path: build-aux/org.gnome.Resources.Devel.ci.json
+          cache-key: flatpak-builder-${{ github.sha }}
+          restore-cache: true
