@@ -220,6 +220,18 @@
           </object>
         </child>
         <child>
+          <object class="AdwPreferencesGroup" id="column_sets_group">
+            <property name="title" translatable="yes">Column Sets</property>
+            <property name="description" translatable="yes">Save the currently selected information columns under a name to switch between them quickly</property>
+            <child>
+              <object class="AdwEntryRow" id="column_set_name_row">
+                <property name="title" translatable="yes">Save Current Columns As…</property>
+                <property name="show-apply-button">true</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
           <object class="AdwPreferencesGroup">
             <property name="title" translatable="yes">Information Columns</property>
             <child>

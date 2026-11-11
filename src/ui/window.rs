@@ -27,6 +27,7 @@ use crate::ui::pages::drive::ResDrive;
 use crate::ui::pages::processes::ResProcesses;
 use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
 use crate::utils::settings::SETTINGS;
+use crate::utils::units::{convert_fraction, convert_storage};
 
 use super::pages::applications;
 use super::pages::gpu::ResGPU;
@@ -784,12 +785,43 @@ impl MainWindow {
             page.refresh_page(&npu_data);
         }
 
+        // remember which process uses the most CPU and memory right now, so the
+        // graphs can show it in their tooltips
+        let top_cpu = apps_context
+            .processes_iter()
+            .filter(|process| process.cpu_time_ratio() > 0.0)
+            .max_by(|a, b| a.cpu_time_ratio().total_cmp(&b.cpu_time_ratio()))
+            .map(|process| {
+                i18n_f(
+                    "Top: {} ({}) — {}",
+                    &[
+                        &process.display_name,
+                        &process.data.pid.to_string(),
+                        &convert_fraction(f64::from(process.cpu_time_ratio()), false),
+                    ],
+                )
+            });
+        let top_memory = apps_context
+            .processes_iter()
+            .max_by_key(|process| process.mem_usage())
+            .map(|process| {
+                i18n_f(
+                    "Top: {} ({}) — {}",
+                    &[
+                        &process.display_name,
+                        &process.data.pid.to_string(),
+                        &convert_storage(process.mem_usage() as f64, false),
+                    ],
+                )
+            });
+
         std::mem::drop(apps_context);
 
         /*
          * Cpu
          */
         if let Some(cpu_data) = cpu_data {
+            imp.cpu.imp().total_cpu.graph().set_pending_label(top_cpu);
             imp.cpu.refresh_page(&cpu_data);
         }
 
@@ -798,6 +830,11 @@ impl MainWindow {
          */
         if let Some(mem_data_result) = mem_data {
             if let Ok(mem_data) = mem_data_result {
+                imp.memory
+                    .imp()
+                    .memory
+                    .graph()
+                    .set_pending_label(top_memory);
                 imp.memory.refresh_page(mem_data);
             } else if let Err(error) = mem_data_result {
                 warn!("Unable to update memory data, reason: {error}");

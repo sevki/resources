@@ -24,7 +24,9 @@ mod imp {
     use gtk::{
         glib,
         subclass::{
-            prelude::{ObjectImpl, ObjectSubclass, ObjectSubclassExt},
+            prelude::{
+                ObjectImpl, ObjectImplExt, ObjectSubclass, ObjectSubclassExt, ObjectSubclassIsExt,
+            },
             widget::WidgetImpl,
         },
     };
@@ -42,6 +44,11 @@ mod imp {
     #[derive(Debug)]
     pub struct ResGraph {
         pub data_points: RefCell<VecDeque<f64>>,
+        /// Optional description of what caused each data point (e.g. the
+        /// process using the most CPU), always the same length as `data_points`
+        pub labels: RefCell<VecDeque<Option<String>>>,
+        /// Label attached to the next pushed data point
+        pub pending_label: RefCell<Option<String>>,
         pub max_y: Cell<Option<f64>>,
         pub graph_color: Cell<RGBColor>,
     }
@@ -55,6 +62,8 @@ mod imp {
 
             Self {
                 data_points: RefCell::new(empty_deque),
+                labels: RefCell::new(VecDeque::from(vec![None; MAX_DATA_POINTS as usize])),
+                pending_label: RefCell::new(None),
                 max_y: Cell::new(Some(1.0)),
                 graph_color: Cell::default(),
             }
@@ -68,7 +77,35 @@ mod imp {
         type ParentType = gtk::Widget;
     }
 
-    impl ObjectImpl for ResGraph {}
+    impl ObjectImpl for ResGraph {
+        fn constructed(&self) {
+            self.parent_constructed();
+
+            let obj = self.obj();
+            obj.set_has_tooltip(true);
+            obj.connect_query_tooltip(|graph, x, _y, _keyboard, tooltip| {
+                let imp = graph.imp();
+                let labels = imp.labels.borrow();
+                let width = f64::from(graph.width());
+                let index = super::label_index(
+                    f64::from(x),
+                    width,
+                    SETTINGS.graph_data_points() as usize,
+                    labels.len(),
+                );
+                match index
+                    .and_then(|index| labels.get(index))
+                    .and_then(|label| label.as_deref())
+                {
+                    Some(label) => {
+                        tooltip.set_text(Some(label));
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+    }
 
     impl WidgetImpl for ResGraph {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
@@ -189,7 +226,20 @@ impl ResGraph {
             data_points.pop_front();
         }
         data_points.push_back(data);
+
+        let mut labels = imp.labels.borrow_mut();
+        if labels.len() >= MAX_DATA_POINTS as usize {
+            labels.pop_front();
+        }
+        labels.push_back(imp.pending_label.take());
+
         self.queue_draw_if_not_suspended();
+    }
+
+    /// Sets a description shown in the tooltip for the next data point pushed
+    /// with [`Self::push_data_point`], e.g. the process causing the load.
+    pub fn set_pending_label(&self, label: Option<String>) {
+        *self.imp().pending_label.borrow_mut() = label;
     }
 
     pub fn data_points(&self) -> Vec<f64> {
@@ -204,12 +254,19 @@ impl ResGraph {
                 data_points.pop_front();
             }
             data_points.push_back(*data_point);
+
+            let mut labels = imp.labels.borrow_mut();
+            if labels.len() >= MAX_DATA_POINTS as usize {
+                labels.pop_front();
+            }
+            labels.push_back(None);
         }
         self.queue_draw_if_not_suspended();
     }
 
     pub fn clear_data_points(&self) {
         self.imp().data_points.borrow_mut().clear();
+        self.imp().labels.borrow_mut().clear();
     }
 
     pub fn queue_draw_if_not_suspended(&self) {
@@ -223,5 +280,47 @@ impl ResGraph {
         } else {
             self.imp().obj().queue_draw();
         }
+    }
+}
+
+/// Maps a horizontal position in the graph to the index of the data point
+/// drawn there. The graph shows the most recent `shown` of `total` points
+/// spread over `width`.
+fn label_index(x: f64, width: f64, shown: usize, total: usize) -> Option<usize> {
+    if width <= 0.0 || shown == 0 || total == 0 {
+        return None;
+    }
+    let shown = shown.min(total);
+    let start = total - shown;
+    let position = if shown == 1 {
+        0.0
+    } else {
+        (x / width).clamp(0.0, 1.0) * (shown - 1) as f64
+    };
+    Some(start + position.round() as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::label_index;
+
+    #[test]
+    fn maps_edges_and_middle() {
+        // 600 stored points, last 60 shown over 300px
+        assert_eq!(label_index(0.0, 300.0, 60, 600), Some(540));
+        assert_eq!(label_index(300.0, 300.0, 60, 600), Some(599));
+        assert_eq!(label_index(150.0, 300.0, 60, 600), Some(540 + 30));
+    }
+
+    #[test]
+    fn clamps_and_handles_degenerate_input() {
+        assert_eq!(label_index(-50.0, 300.0, 60, 600), Some(540));
+        assert_eq!(label_index(900.0, 300.0, 60, 600), Some(599));
+        assert_eq!(label_index(10.0, 0.0, 60, 600), None);
+        assert_eq!(label_index(10.0, 300.0, 0, 600), None);
+        assert_eq!(label_index(10.0, 300.0, 60, 0), None);
+        // fewer stored points than shown
+        assert_eq!(label_index(300.0, 300.0, 60, 10), Some(9));
+        assert_eq!(label_index(0.0, 300.0, 1, 10), Some(9));
     }
 }

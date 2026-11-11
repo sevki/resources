@@ -216,6 +216,10 @@
       <default>0</default>
       <summary>Which information the details pane of the Processes view shows</summary>
     </key>
+    <key name="processes-column-sets" type="s">
+      <default>'[]'</default>
+      <summary>Saved sets of visible columns of the Processes view, as JSON</summary>
+    </key>
     <key name="processes-sort-by" type="u">
       <default>3</default>
       <summary>Which column the Processes column view should be sorted by</summary>

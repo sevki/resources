@@ -1,13 +1,19 @@
 use adw::{prelude::*, subclass::prelude::*};
-use gtk::glib;
+use gtk::glib::{self, clone};
 use log::trace;
 
 use crate::{
     config::DEVLOPMENT_BUILD,
-    utils::settings::{Base, RefreshSpeed, SETTINGS, SidebarMeterType, TemperatureUnit},
+    utils::{
+        column_sets,
+        i18n::{i18n, ni18n_f},
+        settings::{Base, RefreshSpeed, SETTINGS, SidebarMeterType, TemperatureUnit},
+    },
 };
 
 mod imp {
+
+    use std::cell::RefCell;
 
     use super::*;
 
@@ -61,6 +67,11 @@ mod imp {
 
         #[template_child]
         pub processes_niceness: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub column_sets_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub column_set_name_row: TemplateChild<adw::EntryRow>,
+        pub column_set_rows: RefCell<Vec<adw::ActionRow>>,
         #[template_child]
         pub processes_tree_view_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
@@ -172,6 +183,98 @@ impl ResSettingsDialog {
     pub fn init(&self) {
         self.setup_widgets();
         self.setup_signals();
+        self.setup_column_sets();
+    }
+
+    fn stored_column_sets() -> Vec<column_sets::ColumnSet> {
+        column_sets::parse(SETTINGS.string("processes-column-sets").as_str())
+    }
+
+    fn store_column_sets(sets: &[column_sets::ColumnSet]) {
+        let _ = SETTINGS.set_string("processes-column-sets", &column_sets::serialize(sets));
+    }
+
+    fn setup_column_sets(&self) {
+        let imp = self.imp();
+
+        imp.column_set_name_row.connect_apply(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |row| {
+                let mut sets = Self::stored_column_sets();
+                let columns = column_sets::current(|key| SETTINGS.boolean(key));
+                if column_sets::upsert(&mut sets, row.text().as_str(), columns) {
+                    Self::store_column_sets(&sets);
+                    row.set_text("");
+                    this.rebuild_column_set_rows();
+                }
+            }
+        ));
+
+        self.rebuild_column_set_rows();
+    }
+
+    fn rebuild_column_set_rows(&self) {
+        let imp = self.imp();
+
+        for row in imp.column_set_rows.borrow_mut().drain(..) {
+            imp.column_sets_group.remove(&row);
+        }
+
+        for set in Self::stored_column_sets() {
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&set.name))
+                .subtitle(ni18n_f(
+                    "{} column",
+                    "{} columns",
+                    set.columns.len() as u32,
+                    &[&set.columns.len().to_string()],
+                ))
+                .build();
+
+            let apply = gtk::Button::builder()
+                .label(i18n("Apply"))
+                .valign(gtk::Align::Center)
+                .build();
+            apply.connect_clicked(clone!(
+                #[weak(rename_to = this)]
+                self,
+                #[strong]
+                set,
+                move |_| {
+                    for (key, visible) in set.visibility() {
+                        let _ = SETTINGS.set_boolean(key, visible);
+                    }
+                    // bring the switches below in line with the new values
+                    this.setup_widgets();
+                }
+            ));
+
+            let delete = gtk::Button::builder()
+                .icon_name("user-trash-symbolic")
+                .tooltip_text(i18n("Delete Column Set"))
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            delete.connect_clicked(clone!(
+                #[weak(rename_to = this)]
+                self,
+                #[strong]
+                set,
+                move |_| {
+                    let mut sets = Self::stored_column_sets();
+                    if column_sets::remove(&mut sets, &set.name) {
+                        Self::store_column_sets(&sets);
+                        this.rebuild_column_set_rows();
+                    }
+                }
+            ));
+
+            row.add_suffix(&apply);
+            row.add_suffix(&delete);
+            imp.column_sets_group.add(&row);
+            imp.column_set_rows.borrow_mut().push(row);
+        }
     }
 
     pub fn setup_widgets(&self) {
