@@ -1,0 +1,93 @@
+name: Release
+
+# Builds the artifacts for a tag and attaches them to a GitHub release:
+#   - resources-<tag>.flatpak      Flatpak bundle (x86_64)
+#   - resources-<tag>.tar.xz       source tarball with vendored Rust crates
+#   - SHA256SUMS
+on:
+  push:
+    tags: ['v*', '[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      # see ci.yml: the project manifest targets the GNOME nightly runtime
+      - name: Pin runtime version
+        run: |
+          sed 's/"runtime-version": "master"/"runtime-version": "51"/' \
+            build-aux/org.gnome.Resources.Devel.json > build-aux/org.gnome.Resources.Devel.ci.json
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: resources-devel.flatpak
+          manifest-path: build-aux/org.gnome.Resources.Devel.ci.json
+          cache-key: flatpak-builder-release-${{ github.sha }}
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: resources-devel.flatpak
+
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # same layout as `meson dist` (build-aux/dist-vendor.sh) without needing
+      # libadwaita 1.8 to configure the project
+      - name: Create source tarball
+        run: |
+          name="resources-${GITHUB_REF_NAME}"
+          git archive --format=tar --prefix="$name/" HEAD | tar -x
+          cd "$name"
+          mkdir .cargo
+          cargo vendor | sed 's/^directory = ".*"/directory = "vendor"/g' > .cargo/config
+          cd ..
+          tar -cJf "$name.tar.xz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: resources-*.tar.xz
+
+  publish:
+    needs: [flatpak, source]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Name and checksum artifacts
+        run: |
+          cd artifacts
+          mv resources-devel.flatpak "resources-${GITHUB_REF_NAME}.flatpak"
+          sha256sum * > SHA256SUMS
+          ls -l
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

@@ -1,0 +1,26 @@
+name: Install apt packages
+description: >
+  Installs packages on a GitHub-hosted Ubuntu runner. The runners' default
+  Azure mirror regularly stalls (every download hangs until it times out), so
+  use a different mirror and fail fast with retries instead.
+inputs:
+  packages:
+    description: Space-separated package names
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+          [ -f "$f" ] && sudo sed -i \
+            -e 's|http://azure.archive.ubuntu.com/ubuntu|http://mirrors.edge.kernel.org/ubuntu|g' \
+            -e 's|http://archive.ubuntu.com/ubuntu|http://mirrors.edge.kernel.org/ubuntu|g' "$f"
+        done
+        printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "20";' \
+          'Acquire::https::Timeout "20";' | sudo tee /etc/apt/apt.conf.d/99ci >/dev/null
+        sudo -E apt-get update
+        sudo -E apt-get install -y --no-install-recommends $PACKAGES
