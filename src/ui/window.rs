@@ -92,6 +92,8 @@ mod imp {
         #[template_child]
         pub processes_search_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
+        pub processes_tree_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
         pub memory: TemplateChild<ResMemory>,
         #[template_child]
         pub memory_page: TemplateChild<gtk::StackPage>,
@@ -132,6 +134,7 @@ mod imp {
                 processes: TemplateChild::default(),
                 processes_page: TemplateChild::default(),
                 processes_search_button: TemplateChild::default(),
+                processes_tree_button: TemplateChild::default(),
                 cpu: TemplateChild::default(),
                 cpu_page: TemplateChild::default(),
                 memory: TemplateChild::default(),
@@ -332,6 +335,14 @@ impl MainWindow {
             )
             .sync_create()
             .bidirectional()
+            .build();
+
+        SETTINGS
+            .bind(
+                "processes-tree-view",
+                &imp.processes_tree_button.get(),
+                "active",
+            )
             .build();
 
         imp.content_stack.connect_visible_child_notify(clone!(

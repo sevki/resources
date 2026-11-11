@@ -62,6 +62,12 @@ mod imp {
         #[template_child]
         pub processes_niceness: TemplateChild<adw::SwitchRow>,
         #[template_child]
+        pub processes_tree_view_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub processes_row_colors_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub processes_highlight_duration_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
         pub processes_show_id_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub processes_show_user_row: TemplateChild<adw::SwitchRow>,
@@ -212,6 +218,12 @@ impl ResSettingsDialog {
 
         imp.processes_niceness
             .set_active(SETTINGS.detailed_priority());
+        imp.processes_tree_view_row
+            .set_active(SETTINGS.processes_tree_view());
+        imp.processes_row_colors_row
+            .set_active(SETTINGS.processes_row_colors());
+        imp.processes_highlight_duration_row
+            .set_value(SETTINGS.processes_highlight_duration() as f64);
         imp.processes_show_id_row
             .set_active(SETTINGS.processes_show_id());
         imp.processes_show_user_row
@@ -464,6 +476,21 @@ impl ResSettingsDialog {
         imp.processes_show_commandline_row
             .connect_active_notify(|switch_row| {
                 let _ = SETTINGS.set_processes_show_commandline(switch_row.is_active());
+            });
+
+        imp.processes_tree_view_row
+            .connect_active_notify(|switch_row| {
+                let _ = SETTINGS.set_processes_tree_view(switch_row.is_active());
+            });
+
+        imp.processes_row_colors_row
+            .connect_active_notify(|switch_row| {
+                let _ = SETTINGS.set_processes_row_colors(switch_row.is_active());
+            });
+
+        imp.processes_highlight_duration_row
+            .connect_value_notify(|spin_row| {
+                let _ = SETTINGS.set_processes_highlight_duration(spin_row.value() as i32);
             });
 
         imp.show_virtual_drives_row

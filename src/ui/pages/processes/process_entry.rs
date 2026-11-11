@@ -2,6 +2,8 @@ use gtk::{
     glib::{self, GString},
     subclass::prelude::ObjectSubclassIsExt,
 };
+use std::time::Instant;
+
 use log::trace;
 use process_data::Containerization;
 
@@ -102,7 +104,45 @@ mod imp {
         #[allow(dead_code)]
         symbolic: Cell<bool>,
 
+        #[property(get, set)]
+        parent_pid: Cell<i32>,
+
+        #[property(get, set)]
+        uid: Cell<u32>,
+
+        /// Number of ancestors in the process tree
+        #[property(get, set)]
+        depth: Cell<u32>,
+
+        #[property(get, set)]
+        has_children: Cell<bool>,
+
+        /// Whether the children of this process are shown in tree mode
+        #[property(get, set, default = true)]
+        expanded: Cell<bool>,
+
+        /// `true` while the tree view is active, so that cells show an expander
+        #[property(get, set)]
+        tree_visible: Cell<bool>,
+
+        /// `true` if an ancestor is collapsed
+        #[property(get, set)]
+        hidden: Cell<bool>,
+
+        /// Position in the depth-first ordering of the process tree
+        #[property(get, set)]
+        tree_index: Cell<u32>,
+
+        /// One of `none`, `new`, `ended`, `stopped`, `sandboxed`, `own`, `service`
+        #[property(get, set)]
+        row_state: RefCell<String>,
+
         pub affinity: RefCell<Vec<bool>>,
+        pub state: Cell<char>,
+        pub sandboxed: Cell<bool>,
+        /// `None` if the process was already running when the list was first populated
+        pub first_seen: Cell<Option<Instant>>,
+        pub ended_at: Cell<Option<Instant>>,
     }
 
     impl Default for ProcessEntry {
@@ -133,7 +173,20 @@ mod imp {
                 containerization: Cell::new(glib::GString::default()),
                 running_since: Cell::new(None),
                 symbolic: Cell::new(false),
+                parent_pid: Cell::new(0),
+                uid: Cell::new(0),
+                depth: Cell::new(0),
+                has_children: Cell::new(false),
+                expanded: Cell::new(true),
+                tree_visible: Cell::new(false),
+                hidden: Cell::new(false),
+                tree_index: Cell::new(0),
+                row_state: RefCell::new(String::new()),
                 affinity: Default::default(),
+                state: Cell::new('?'),
+                sandboxed: Cell::new(false),
+                first_seen: Cell::new(None),
+                ended_at: Cell::new(None),
             }
         }
     }
@@ -264,6 +317,37 @@ impl ProcessEntry {
         self.set_total_cpu_time(self.user_cpu_time() + self.system_cpu_time());
         self.set_niceness(*process.data.niceness);
         (*self.imp().affinity.borrow_mut()).clone_from(&process.data.affinity);
+        self.set_parent_pid(process.data.parent_pid);
+        self.set_uid(process.data.uid);
+        self.imp().state.set(process.data.state);
+        self.imp()
+            .sandboxed
+            .set(process.data.containerization != Containerization::None);
+    }
+
+    /// Process state character from `/proc/<pid>/stat`
+    pub fn state(&self) -> char {
+        self.imp().state.get()
+    }
+
+    pub fn is_sandboxed(&self) -> bool {
+        self.imp().sandboxed.get()
+    }
+
+    pub fn first_seen(&self) -> Option<Instant> {
+        self.imp().first_seen.get()
+    }
+
+    pub fn set_first_seen(&self, first_seen: Option<Instant>) {
+        self.imp().first_seen.set(first_seen);
+    }
+
+    pub fn ended_at(&self) -> Option<Instant> {
+        self.imp().ended_at.get()
+    }
+
+    pub fn mark_ended(&self, at: Instant) {
+        self.imp().ended_at.set(Some(at));
     }
 
     pub fn affinity(&self) -> Vec<bool> {

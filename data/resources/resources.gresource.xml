@@ -14,6 +14,7 @@
     <file preprocess="xml-stripblanks" alias="flash-storage-symbolic.svg">icons/flash-storage-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="floppy-symbolic.svg">icons/floppy-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="generic-process-symbolic.svg">icons/generic-process-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="process-tree-symbolic.svg">icons/process-tree-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="generic-settings-symbolic.svg">icons/generic-settings-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="gpu-symbolic.svg">icons/gpu-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="hdd-symbolic.svg">icons/hdd-symbolic.svg</file>

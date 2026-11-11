@@ -9,6 +9,7 @@ use crate::util::{NUM_CPUS, extract_from_regex};
 
 // we split the stat contents where the executable name ends, which is the second element
 const STAT_OFFSET: usize = 2;
+const STAT_STATE: usize = 3 - STAT_OFFSET - 1;
 const STAT_PARENT_PID: usize = 3 - STAT_OFFSET;
 const STAT_USER_CPU_TIME: usize = 13 - STAT_OFFSET;
 const STAT_SYSTEM_CPU_TIME: usize = 14 - STAT_OFFSET;
@@ -16,6 +17,8 @@ const STAT_NICE: usize = 18 - STAT_OFFSET;
 const STAT_STARTTIME: usize = 21 - STAT_OFFSET;
 
 pub struct StatFields {
+    /// single-character process state, see man proc(5) (e.g. 'R', 'S', 'T', 'Z')
+    pub state: char,
     pub parent_pid: libc::pid_t,
     pub user_cpu_time: u64,
     pub system_cpu_time: u64,
@@ -41,6 +44,12 @@ impl StatFields {
                 .context("wrong stat file format")
                 .inspect_err(|err| trace!("Can't parse {label} from 'stat': {err}"))
         };
+
+        let state = field(STAT_STATE, "state")?
+            .chars()
+            .next()
+            .context("empty state field in stat")?;
+        trace!("State of {pid} determined to be {state}");
 
         let parent_pid = field(STAT_PARENT_PID, "parent pid")?
             .parse()
@@ -68,6 +77,7 @@ impl StatFields {
         trace!("Starttime of {pid} determined to be {starttime}");
 
         Ok(StatFields {
+            state,
             parent_pid,
             user_cpu_time,
             system_cpu_time,
@@ -216,5 +226,22 @@ impl IoFields {
             read_bytes,
             write_bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod stat_tests {
+    use super::*;
+
+    const STAT_LINE: &str = "1234 (my (weird) proc) T 42 1234 1234 0 -1 4194560 100 0 0 0 7 3 0 0 20 0 1 0 5555 1000 100 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
+
+    #[test]
+    fn parses_state_and_parent() {
+        let stat = StatFields::parse(1234, STAT_LINE).unwrap();
+        assert_eq!(stat.state, 'T');
+        assert_eq!(stat.parent_pid, 42);
+        assert_eq!(stat.user_cpu_time, 7);
+        assert_eq!(stat.system_cpu_time, 3);
+        assert_eq!(stat.starttime, 5555);
     }
 }

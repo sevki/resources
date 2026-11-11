@@ -111,6 +111,9 @@ pub struct ProcessData {
     pub pid: libc::pid_t,
     pub parent_pid: libc::pid_t,
     pub user: String,
+    pub uid: u32,
+    /// single-character process state from /proc/<pid>/stat ('T' / 't' means stopped)
+    pub state: char,
     pub comm: String,
     pub commandline: String,
     pub user_cpu_time: u64,
@@ -281,6 +284,8 @@ impl ProcessData {
         Ok(Self {
             pid,
             parent_pid: stat.parent_pid,
+            uid: status.uid,
+            state: stat.state,
             user,
             comm,
             commandline,

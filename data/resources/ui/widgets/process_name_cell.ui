@@ -3,6 +3,22 @@
   <template class="ResProcessNameCell" parent="GtkBox">
     <property name="spacing">12</property>
     <child>
+      <object class="GtkButton" id="expander">
+        <property name="visible">false</property>
+        <property name="valign">center</property>
+        <property name="icon-name">pan-down-symbolic</property>
+        <property name="tooltip-text" translatable="yes">Collapse or expand child processes</property>
+        <accessibility>
+          <property name="label" translatable="yes">Collapse or expand child processes</property>
+        </accessibility>
+        <style>
+          <class name="flat"/>
+          <class name="circular"/>
+          <class name="process-expander"/>
+        </style>
+      </object>
+    </child>
+    <child>
       <object class="GtkImage" id="image">
         <property name="pixel-size">16</property>
         <style>
