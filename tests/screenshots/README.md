@@ -19,11 +19,22 @@ tests/screenshots/run.sh --prefix "$PWD/install" --update   # accept changes
 ```
 
 Needs `Xvfb`, `xdotool`, ImageMagick and `dbus-run-session`. On failure
-`screenshots-out/<name>.diff.png` shows what differs. CI uploads the
-screenshots of every run as the `screenshots` artifact, so goldens can also be
-refreshed from there. After intentional UI changes, run with `--update` and
-commit the new images.
+`screenshots-out/<name>.diff.png` shows what differs.
 
-Goldens are rendered with the libadwaita 1.5 of Ubuntu 24.04 (see
-`build-aux/ci-compat-libadwaita.sh`); a different libadwaita or font setup will
-render slightly differently.
+## Updating the golden images
+
+Text is rasterized slightly differently on different machines (same layout,
+different glyph edges), so the goldens are the images rendered **by the CI
+runner**. After an intentional UI change, push it, let the `screenshots` job
+fail, and run
+
+```sh
+tests/screenshots/update-from-ci.sh <workflow run id>
+```
+
+which copies the screenshots uploaded by that run (the job uploads them even
+when the comparison fails) over the goldens. Commit the result.
+
+`run.sh --update` still works for a quick local look, but comparing locally
+against CI-rendered goldens will report a few percent of differing pixels
+on other machines.
