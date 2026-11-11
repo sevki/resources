@@ -326,7 +326,12 @@ impl Settings {
 
     int_settings!(window_width, window_height, processes_highlight_duration);
 
-    uint_settings!(graph_data_points, apps_sort_by, processes_sort_by);
+    uint_settings!(
+        graph_data_points,
+        apps_sort_by,
+        processes_sort_by,
+        processes_details_mode
+    );
 
     bool_settings!(
         show_virtual_drives,
@@ -364,6 +369,7 @@ impl Settings {
         processes_show_combined_memory,
         processes_show_commandline,
         processes_tree_view,
+        processes_show_details,
         processes_row_colors,
         memory_show_swap_devices,
         show_logical_cpus,

@@ -1,3 +1,4 @@
+mod details_pane;
 pub mod process_entry;
 mod process_name_cell;
 pub mod row_state;
@@ -35,6 +36,7 @@ use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
 use crate::utils::settings::SETTINGS;
 use crate::utils::units::{convert_speed, convert_storage, format_time};
 
+use self::details_pane::{DetailsMode, DetailsPane};
 use self::process_entry::ProcessEntry;
 use self::process_name_cell::ResProcessNameCell;
 use self::row_state::{RowInfo, RowState};
@@ -95,6 +97,9 @@ mod imp {
         pub search_entry: TemplateChild<gtk::SearchEntry>,
         #[template_child]
         pub processes_scrolled_window: TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub details_paned: TemplateChild<gtk::Paned>,
+        pub details_pane: RefCell<Option<DetailsPane>>,
         #[template_child]
         pub options_button: TemplateChild<gtk::Button>,
         #[template_child]
@@ -176,6 +181,8 @@ mod imp {
                 search_bar: Default::default(),
                 search_entry: Default::default(),
                 processes_scrolled_window: Default::default(),
+                details_paned: Default::default(),
+                details_pane: Default::default(),
                 options_button: Default::default(),
                 information_button: Default::default(),
                 end_process_button: Default::default(),
@@ -517,6 +524,18 @@ impl ResProcesses {
         *imp.filter_model.borrow_mut() = filter_model;
 
         imp.processes_scrolled_window.set_child(Some(&*column_view));
+
+        let details_pane =
+            DetailsPane::new(DetailsMode::from_index(SETTINGS.processes_details_mode()));
+        details_pane.widget().set_size_request(-1, 220);
+        details_pane.connect_mode_changed(|mode| {
+            let _ = SETTINGS.set_processes_details_mode(mode.index());
+        });
+        imp.details_paned.set_end_child(Some(details_pane.widget()));
+        details_pane
+            .widget()
+            .set_visible(SETTINGS.processes_show_details());
+        *imp.details_pane.borrow_mut() = Some(details_pane);
     }
 
     fn setup_columns(&self) {
@@ -838,6 +857,17 @@ impl ResProcesses {
                     let bitset = model.selection();
 
                     let one_selected = bitset.size() == 1;
+
+                    if let Some(pane) = &*imp.details_pane.borrow() {
+                        pane.set_pid(if one_selected {
+                            model
+                                .item(bitset.minimum())
+                                .and_downcast::<ProcessEntry>()
+                                .map(|entry| entry.pid())
+                        } else {
+                            None
+                        });
+                    }
                     let multiple_selected = bitset.size() > 0;
 
                     imp.toolbar_view.set_reveal_bottom_bars(multiple_selected);
@@ -878,6 +908,17 @@ impl ResProcesses {
             #[weak(rename_to = this)]
             self,
             move |_| this.relayout_tree()
+        ));
+
+        SETTINGS.connect_processes_show_details(clone!(
+            #[weak]
+            imp,
+            move |show| {
+                if let Some(pane) = &*imp.details_pane.borrow() {
+                    pane.widget().set_visible(show);
+                    pane.refresh();
+                }
+            }
         ));
 
         SETTINGS.connect_processes_tree_view(clone!(
@@ -1328,6 +1369,12 @@ impl ResProcesses {
 
         if let Some(sorter) = imp.column_view.borrow().sorter() {
             sorter.changed(gtk::SorterChange::Different);
+        }
+
+        if SETTINGS.processes_show_details()
+            && let Some(pane) = &*imp.details_pane.borrow()
+        {
+            pane.refresh();
         }
 
         if imp.selection_model.borrow().selection().size() == 0 {

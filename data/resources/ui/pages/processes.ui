@@ -113,10 +113,19 @@
         <property name="content">
           <object class="AdwToastOverlay" id="toast_overlay">
             <child>
-              <object class="GtkScrolledWindow" id="processes_scrolled_window">
-                <property name="hexpand">true</property>
-                <property name="vexpand">true</property>
-                <property name="hscrollbar_policy">automatic</property>
+              <object class="GtkPaned" id="details_paned">
+                <property name="orientation">vertical</property>
+                <property name="resize-start-child">true</property>
+                <property name="resize-end-child">false</property>
+                <property name="shrink-start-child">false</property>
+                <property name="shrink-end-child">false</property>
+                <property name="start-child">
+                  <object class="GtkScrolledWindow" id="processes_scrolled_window">
+                    <property name="hexpand">true</property>
+                    <property name="vexpand">true</property>
+                    <property name="hscrollbar_policy">automatic</property>
+                  </object>
+                </property>
               </object>
             </child>
           </object>

@@ -122,6 +122,15 @@
                               </object>
                             </child>
                             <child>
+                              <object class="GtkToggleButton" id="processes_details_button">
+                                <property name="icon-name">view-dual-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Show Process Details</property>
+                                <accessibility>
+                                  <property name="label" translatable="yes">Show process details</property>
+                                </accessibility>
+                              </object>
+                            </child>
+                            <child>
                               <object class="GtkToggleButton" id="processes_tree_button">
                                 <property name="icon-name">process-tree-symbolic</property>
                                 <property name="tooltip-text" translatable="yes">Show Process Tree</property>
