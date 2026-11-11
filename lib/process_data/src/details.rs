@@ -464,9 +464,104 @@ pub fn read_security(pid: libc::pid_t) -> Result<SecurityInfo> {
     Ok(info)
 }
 
+// -------------------------------------------------------------------- find
+
+/// A file, library or socket of some process matching a search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindMatch {
+    pub pid: libc::pid_t,
+    pub kind: FindKind,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindKind {
+    Library,
+    File,
+}
+
+/// Case-insensitive substring match of `needle` against the libraries and
+/// open files of a single process. Silently yields nothing for processes that
+/// can't be inspected.
+#[must_use]
+pub fn find_in_process(pid: libc::pid_t, needle: &str) -> Vec<FindMatch> {
+    let needle = needle.to_lowercase();
+    let mut matches = Vec::new();
+
+    if let Ok(libraries) = read_mapped_files(pid) {
+        matches.extend(
+            libraries
+                .into_iter()
+                .filter(|library| library.path.to_lowercase().contains(&needle))
+                .map(|library| FindMatch {
+                    pid,
+                    kind: FindKind::Library,
+                    target: library.path,
+                }),
+        );
+    }
+    if let Ok(files) = read_open_files(pid) {
+        matches.extend(
+            files
+                .into_iter()
+                .filter(|file| file.kind == FdKind::File)
+                .filter(|file| file.target.to_lowercase().contains(&needle))
+                .map(|file| FindMatch {
+                    pid,
+                    kind: FindKind::File,
+                    target: file.target,
+                }),
+        );
+    }
+
+    matches
+}
+
+/// Searches all processes, see [`find_in_process`].
+#[must_use]
+pub fn find_all(needle: &str) -> Vec<FindMatch> {
+    if needle.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut pids: Vec<libc::pid_t> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .collect();
+    pids.sort_unstable();
+    pids.into_iter()
+        .flat_map(|pid| find_in_process(pid, needle.trim()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_own_executable_and_open_file() {
+        let pid = std::process::id() as libc::pid_t;
+        let exe = std::fs::read_link("/proc/self/exe").unwrap();
+        let name = exe.file_name().unwrap().to_string_lossy().to_string();
+
+        let matches = find_in_process(pid, &name.to_uppercase());
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.kind == FindKind::Library && m.target.contains(&name)),
+            "{matches:?}"
+        );
+
+        let path = std::env::temp_dir().join(format!("res-find-test-{pid}"));
+        let _file = std::fs::File::create(&path).unwrap();
+        let matches = find_in_process(pid, &format!("res-find-test-{pid}"));
+        std::fs::remove_file(&path).ok();
+        assert!(matches.iter().any(|m| m.kind == FindKind::File), "{matches:?}");
+
+        assert!(find_all("   ").is_empty());
+        assert!(find_all(&format!("res-find-test-{pid}-nonexistent")).is_empty());
+    }
 
     #[test]
     fn maps_merge_by_path_and_skip_anonymous() {

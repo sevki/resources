@@ -31,6 +31,7 @@ src/devices/link/wifi.rs
 src/devices/network.rs
 src/devices/npu/mod.rs
 src/ui/dialogs/app_dialog.rs
+src/ui/dialogs/find_dialog.rs
 src/ui/dialogs/process_dialog.rs
 src/ui/dialogs/process_options_dialog.rs
 src/ui/pages/applications/application_entry.rs
@@ -42,6 +43,7 @@ src/ui/pages/gpu.rs
 src/ui/pages/memory.rs
 src/ui/pages/mod.rs
 src/ui/pages/network.rs
+src/ui/pages/processes/details_pane.rs
 src/ui/pages/processes/mod.rs
 src/ui/pages/processes/process_entry.rs
 src/ui/window.rs

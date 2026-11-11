@@ -2,6 +2,7 @@ mod details_pane;
 pub mod process_entry;
 mod process_name_cell;
 pub mod row_state;
+pub mod snapshot;
 pub mod tree;
 
 use std::cmp::Ordering;
@@ -281,6 +282,49 @@ mod imp {
                             vec![process_entry.clone()],
                             ProcessAction::CONT,
                         );
+                    }
+                },
+            );
+
+            klass.install_action(
+                "processes.context-kill-tree",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.kill_tree(vec![process_entry]);
+                    }
+                },
+            );
+
+            klass.install_action("processes.kill-tree", None, move |res_processes, _, _| {
+                let selected = res_processes.get_selected_process_entries();
+                if !selected.is_empty() {
+                    res_processes.kill_tree(selected);
+                }
+            });
+
+            klass.install_action(
+                "processes.context-search-online",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.search_online(&process_entry);
+                    }
+                },
+            );
+
+            klass.install_action(
+                "processes.context-check-virustotal",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.check_virustotal(&process_entry);
                     }
                 },
             );
@@ -1035,6 +1079,153 @@ impl ResProcesses {
                 }
             ));
         }
+    }
+
+    /// Asks for confirmation, then kills the given processes and everything
+    /// that descends from them.
+    pub fn kill_tree(&self, roots: Vec<ProcessEntry>) {
+        let imp = self.imp();
+
+        let entries: Vec<ProcessEntry> = imp
+            .store
+            .borrow()
+            .iter::<ProcessEntry>()
+            .flatten()
+            .filter(|entry| entry.ended_at().is_none())
+            .collect();
+        let nodes: Vec<(i32, i32)> = entries
+            .iter()
+            .map(|entry| (entry.pid(), entry.parent_pid()))
+            .collect();
+        let root_pids: Vec<i32> = roots.iter().map(ProcessEntry::pid).collect();
+
+        let mut to_kill = tree::with_descendants(&nodes, &root_pids);
+        // children first, so that parents can't respawn them while we work
+        to_kill.reverse();
+
+        let victims: Vec<ProcessEntry> = to_kill
+            .iter()
+            .filter_map(|pid| entries.iter().find(|entry| entry.pid() == *pid).cloned())
+            .collect();
+
+        if !victims.is_empty() {
+            self.open_process_action_dialog(victims, ProcessAction::KILL);
+        }
+    }
+
+    pub fn toast(&self, message: &str) {
+        self.imp().toast_overlay.add_toast(adw::Toast::new(message));
+    }
+
+    fn open_uri(&self, uri: String) {
+        let launcher = gtk::UriLauncher::new(&uri);
+        launcher.launch(
+            Some(&MainWindow::default()),
+            gio::Cancellable::NONE,
+            clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |result| {
+                    if let Err(error) = result
+                        && !error.matches(gtk::DialogError::Dismissed)
+                    {
+                        this.toast(&i18n("Could not open the web browser"));
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Opens a web search for the process.
+    pub fn search_online(&self, process: &ProcessEntry) {
+        let query = glib::Uri::escape_string(&process.name(), None, false);
+        self.open_uri(format!("https://duckduckgo.com/?q={query}"));
+    }
+
+    /// Hashes the process' executable and opens its VirusTotal report. Only
+    /// the hash is sent to VirusTotal, not the file.
+    pub fn check_virustotal(&self, process: &ProcessEntry) {
+        let pid = process.pid();
+        glib::spawn_future_local(clone!(
+            #[weak(rename_to = this)]
+            self,
+            async move {
+                let hash = gio::spawn_blocking(move || {
+                    process_data::hash::sha256_file_hex(format!("/proc/{pid}/exe"))
+                })
+                .await;
+                match hash {
+                    Ok(Ok(hash)) => {
+                        this.open_uri(format!("https://www.virustotal.com/gui/file/{hash}"));
+                    }
+                    _ => this.toast(&i18n("Could not read the executable of this process")),
+                }
+            }
+        ));
+    }
+
+    /// Lets the user save the process list as it's currently shown as CSV.
+    pub fn save_snapshot(&self) {
+        let imp = self.imp();
+
+        let header = [
+            "Name",
+            "PID",
+            "Parent PID",
+            "User",
+            "CPU (%)",
+            "Memory (bytes)",
+            "State",
+            "Command line",
+        ];
+        let model = imp.selection_model.borrow().clone();
+        let rows: Vec<Vec<String>> = (0..model.n_items())
+            .filter_map(|position| model.item(position).and_downcast::<ProcessEntry>())
+            .map(|entry| {
+                vec![
+                    entry.name().to_string(),
+                    entry.pid().to_string(),
+                    entry.parent_pid().to_string(),
+                    entry.user().to_string(),
+                    format!("{:.1}", entry.cpu_usage() * 100.0),
+                    entry.memory_usage().to_string(),
+                    entry.state().to_string(),
+                    entry.commandline().to_string(),
+                ]
+            })
+            .collect();
+        let csv = snapshot::to_csv(&header, &rows);
+
+        let dialog = gtk::FileDialog::builder()
+            .title(i18n("Save Process List"))
+            .initial_name("processes.csv")
+            .build();
+        dialog.save(
+            Some(&MainWindow::default()),
+            gio::Cancellable::NONE,
+            clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |result| match result {
+                    Ok(file) => {
+                        let saved = file
+                            .path()
+                            .map(|path| std::fs::write(path, csv.as_bytes()).is_ok())
+                            .unwrap_or(false);
+                        this.toast(&if saved {
+                            i18n("Process list saved")
+                        } else {
+                            i18n("Could not save the process list")
+                        });
+                    }
+                    Err(error) => {
+                        if !error.matches(gtk::DialogError::Dismissed) {
+                            this.toast(&i18n("Could not save the process list"));
+                        }
+                    }
+                }
+            ),
+        );
     }
 
     fn compare_entries(&self, a: &Object, b: &Object) -> gtk::Ordering {

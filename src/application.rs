@@ -216,6 +216,45 @@ impl Application {
         ));
         self.add_action(&action_process_options);
 
+        // Pause / resume updating
+        let action_toggle_pause =
+            gio::SimpleAction::new_stateful("toggle-pause", None, &false.to_variant());
+        action_toggle_pause.connect_activate(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |action, _| {
+                let paused = !action
+                    .state()
+                    .and_then(|s| s.get::<bool>())
+                    .unwrap_or(false);
+                action.set_state(&paused.to_variant());
+                this.main_window().set_user_paused(paused);
+            }
+        ));
+        self.add_action(&action_toggle_pause);
+
+        // Save the process list
+        let action_save_process_list = gio::SimpleAction::new("save-process-list", None);
+        action_save_process_list.connect_activate(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_, _| {
+                this.main_window().shortcut_save_process_list();
+            }
+        ));
+        self.add_action(&action_save_process_list);
+
+        // Find open file or library
+        let action_find_handle = gio::SimpleAction::new("find-handle", None);
+        action_find_handle.connect_activate(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_, _| {
+                this.main_window().shortcut_find_handle();
+            }
+        ));
+        self.add_action(&action_find_handle);
+
         // Toggle Sidebar
         let action_toggle_sidebar = gio::SimpleAction::new("toggle-sidebar", None);
         action_toggle_sidebar.connect_activate(clone!(
@@ -240,6 +279,9 @@ impl Application {
         self.set_accels_for_action("app.information-app-process", &["<Control>I"]);
         self.set_accels_for_action("app.process-options", &["<Control>O"]);
         self.set_accels_for_action("app.toggle-sidebar", &["F9"]);
+        self.set_accels_for_action("app.toggle-pause", &["<Control>p", "Pause"]);
+        self.set_accels_for_action("app.save-process-list", &["<Control>s"]);
+        self.set_accels_for_action("app.find-handle", &["<Control><Shift>f"]);
     }
 
     fn setup_css(&self) {

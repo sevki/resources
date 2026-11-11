@@ -113,6 +113,8 @@ mod imp {
         pub apps_context: RefCell<AppsContext>,
 
         pub pause_updates: Cell<bool>,
+        /// Updates paused by the user (as opposed to by holding Ctrl)
+        pub user_paused: Cell<bool>,
 
         pub sender: Sender<Action>,
         pub receiver: RefCell<Option<Receiver<Action>>>,
@@ -144,6 +146,7 @@ mod imp {
                 memory_page: TemplateChild::default(),
                 apps_context: Default::default(),
                 pause_updates: Default::default(),
+                user_paused: Default::default(),
                 sender,
                 receiver,
                 processor_window_title: TemplateChild::default(),
@@ -476,6 +479,24 @@ impl MainWindow {
         }
     }
 
+    pub fn set_user_paused(&self, paused: bool) {
+        self.imp().user_paused.set(paused);
+        let toast = if paused {
+            i18n("Updates paused")
+        } else {
+            i18n("Updates resumed")
+        };
+        self.imp().processes.toast(&toast);
+    }
+
+    pub fn shortcut_save_process_list(&self) {
+        self.imp().processes.save_snapshot();
+    }
+
+    pub fn shortcut_find_handle(&self) {
+        crate::ui::dialogs::find_dialog::present(self);
+    }
+
     pub fn toggle_sidebar(&self) {
         let imp = self.imp();
 
@@ -676,7 +697,7 @@ impl MainWindow {
         apps_context.refresh(process_data);
 
         // if CTRL is held, don't update apps and processes like Windows Task Manager
-        if !imp.pause_updates.get() {
+        if !imp.pause_updates.get() && !imp.user_paused.get() {
             trace!("Skipping visual apps and processes updates");
             imp.apps.refresh_apps_list(&apps_context);
             imp.processes.refresh_processes_list(&apps_context);

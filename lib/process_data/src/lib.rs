@@ -1,5 +1,6 @@
 pub mod details;
 pub mod gpu_usage;
+pub mod hash;
 pub mod npu_usage;
 pub mod pci_slot;
 pub mod units;

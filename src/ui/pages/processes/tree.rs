@@ -100,9 +100,51 @@ pub fn layout(
     result
 }
 
+/// Returns `roots` followed by all of their (direct and indirect) children,
+/// each pid exactly once, given `nodes` as `(pid, parent_pid)`.
+pub fn with_descendants(nodes: &[(i32, i32)], roots: &[i32]) -> Vec<i32> {
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for (pid, parent_pid) in nodes {
+        if pid != parent_pid {
+            children.entry(*parent_pid).or_default().push(*pid);
+        }
+    }
+
+    let mut seen: HashSet<i32> = HashSet::new();
+    let mut result = Vec::new();
+    let mut stack: Vec<i32> = roots.iter().rev().copied().collect();
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        result.push(pid);
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().rev());
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descendants_include_roots_once() {
+        let nodes = [(1, 0), (2, 1), (3, 2), (4, 1), (5, 99)];
+        assert_eq!(with_descendants(&nodes, &[2]), vec![2, 3]);
+        assert_eq!(with_descendants(&nodes, &[1]), vec![1, 2, 3, 4]);
+        // overlapping roots don't duplicate
+        assert_eq!(with_descendants(&nodes, &[1, 2]), vec![1, 2, 3, 4]);
+        // unknown pids are passed through
+        assert_eq!(with_descendants(&nodes, &[77]), vec![77]);
+    }
+
+    #[test]
+    fn descendants_survive_cycles() {
+        let nodes = [(1, 2), (2, 1)];
+        assert_eq!(with_descendants(&nodes, &[1]), vec![1, 2]);
+    }
 
     fn by_pid(nodes: &[(i32, i32)]) -> impl FnMut(usize, usize) -> Ordering + '_ {
         move |a, b| nodes[a].0.cmp(&nodes[b].0)

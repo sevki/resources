@@ -15,6 +15,8 @@ use crate::utils::TICK_RATE;
 use crate::utils::i18n::i18n;
 use crate::utils::units::{convert_storage, format_time};
 
+type ModeCallback = Box<dyn Fn(DetailsMode)>;
+
 /// Maximum number of columns any mode uses
 const MAX_COLUMNS: usize = 4;
 
@@ -204,7 +206,7 @@ struct Inner {
     /// rows currently shown, to avoid rebuilding the list when nothing changed
     shown: RefCell<Option<Vec<String>>>,
     title: gtk::Label,
-    on_mode_changed: RefCell<Option<Box<dyn Fn(DetailsMode)>>>,
+    on_mode_changed: RefCell<Option<ModeCallback>>,
 }
 
 impl DetailsPane {

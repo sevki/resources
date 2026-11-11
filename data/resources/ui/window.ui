@@ -3,6 +3,20 @@
   <menu id="primary_menu">
     <section>
       <item>
+        <attribute name="label" translatable="yes">_Pause Updates</attribute>
+        <attribute name="action">app.toggle-pause</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Find Open File or Library…</attribute>
+        <attribute name="action">app.find-handle</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Save Process List…</attribute>
+        <attribute name="action">app.save-process-list</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
         <attribute name="label" translatable="yes">_Preferences</attribute>
         <attribute name="action">app.settings</attribute>
       </item>

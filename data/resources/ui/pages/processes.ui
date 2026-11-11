@@ -15,6 +15,12 @@
         <attribute name="action">processes.continue-process</attribute>
       </item>
     </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Kill Process Tree</attribute>
+        <attribute name="action">processes.kill-tree</attribute>
+      </item>
+    </section>
   </menu>
   <menu id="end_process_menu_multiple">
     <section>
@@ -29,6 +35,12 @@
       <item>
         <attribute name="label" translatable="yes">Continue Processes</attribute>
         <attribute name="action">processes.continue-process</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Kill Process Trees</attribute>
+        <attribute name="action">processes.kill-tree</attribute>
       </item>
     </section>
   </menu>
@@ -49,6 +61,20 @@
       <item>
         <attribute name="label" translatable="yes">Continue Process</attribute>
         <attribute name="action">processes.context-continue-process</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Kill Process Tree</attribute>
+        <attribute name="action">processes.context-kill-tree</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Search Online</attribute>
+        <attribute name="action">processes.context-search-online</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Check on VirusTotal</attribute>
+        <attribute name="action">processes.context-check-virustotal</attribute>
       </item>
     </section>
     <section>
