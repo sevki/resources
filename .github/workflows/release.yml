@@ -15,16 +15,23 @@ permissions:
 jobs:
   flatpak:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-nightly
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
       - uses: actions/checkout@v4
 
+      # see ci.yml: the project manifest targets the GNOME nightly runtime
+      - name: Pin runtime version
+        run: |
+          sed 's/"runtime-version": "master"/"runtime-version": "51"/' \
+            build-aux/org.gnome.Resources.Devel.json > build-aux/org.gnome.Resources.Devel.ci.json
+
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: resources-devel.flatpak
-          manifest-path: build-aux/org.gnome.Resources.Devel.json
+          manifest-path: build-aux/org.gnome.Resources.Devel.ci.json
           cache-key: flatpak-builder-release-${{ github.sha }}
           upload-artifact: false
 
@@ -35,6 +42,7 @@ jobs:
 
   source:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
