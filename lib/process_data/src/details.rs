@@ -48,10 +48,8 @@ pub fn parse_maps(maps: &str) -> Vec<MappedFile> {
         let Some((start, end)) = range.split_once('-') else {
             continue;
         };
-        let (Ok(start), Ok(end)) = (
-            u64::from_str_radix(start, 16),
-            u64::from_str_radix(end, 16),
-        ) else {
+        let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
+        else {
             continue;
         };
 
@@ -557,7 +555,10 @@ mod tests {
         let _file = std::fs::File::create(&path).unwrap();
         let matches = find_in_process(pid, &format!("res-find-test-{pid}"));
         std::fs::remove_file(&path).ok();
-        assert!(matches.iter().any(|m| m.kind == FindKind::File), "{matches:?}");
+        assert!(
+            matches.iter().any(|m| m.kind == FindKind::File),
+            "{matches:?}"
+        );
 
         assert!(find_all("   ").is_empty());
         assert!(find_all(&format!("res-find-test-{pid}-nonexistent")).is_empty());
