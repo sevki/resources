@@ -62,6 +62,11 @@ gtk-font-name=DejaVu Sans 10
 gtk-icon-theme-name=Adwaita
 gtk-enable-animations=false
 gtk-cursor-blink=false
+gtk-xft-antialias=1
+gtk-xft-hinting=0
+gtk-xft-hintstyle=hintnone
+gtk-xft-rgba=none
+gtk-xft-dpi=98304
 gtk-application-prefer-dark-theme=false
 INI
 cat > "$XDG_CONFIG_HOME/glib-2.0/settings/keyfile" <<INI
