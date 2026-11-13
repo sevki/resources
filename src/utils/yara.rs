@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use process_data::details::Mapping;
+
+use crate::utils::{host_proc, i18n::i18n};
 use yara_x::{Compiler, Rules, Scanner, SourceCode};
 
 /// Files bigger than this are not scanned
@@ -223,10 +225,10 @@ pub fn scan_file(rules: &RuleSet, path: &Path) -> Result<Vec<YaraMatch>> {
 fn process_files(pid: libc::pid_t) -> (Vec<(PathBuf, PathBuf)>, usize) {
     let mut wanted: BTreeSet<PathBuf> = BTreeSet::new();
 
-    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-        wanted.insert(exe);
+    if let Ok(exe) = host_proc::executable(pid) {
+        wanted.insert(PathBuf::from(exe.path));
     }
-    if let Ok(mapped) = process_data::details::read_mapped_files(pid) {
+    if let Ok(mapped) = host_proc::mapped_files(pid) {
         wanted.extend(mapped.into_iter().map(|file| PathBuf::from(file.path)));
     }
 
@@ -238,7 +240,12 @@ fn process_files(pid: libc::pid_t) -> (Vec<(PathBuf, PathBuf)>, usize) {
         };
         // through the process' root so that files of containers are found
         let via_root = PathBuf::from(format!("/proc/{pid}/root")).join(relative);
-        let candidates = [via_root, path.clone()];
+        // inside Flatpak the files of the host are below /run/host
+        let candidates = [
+            via_root,
+            path.clone(),
+            PathBuf::from("/run/host").join(relative),
+        ];
 
         let existing = candidates.iter().find_map(|candidate| {
             std::fs::metadata(candidate)
@@ -363,6 +370,11 @@ pub fn scan_process_memory(rules: &RuleSet, pid: libc::pid_t) -> Result<MemoryRe
     anyhow::ensure!(
         pid != std::process::id() as libc::pid_t,
         "a process can't scan its own memory, the rules in it would match themselves"
+    );
+
+    anyhow::ensure!(
+        !host_proc::via_helper(),
+        i18n("Scanning memory isn't possible from inside the Flatpak sandbox")
     );
 
     let mut report = MemoryReport::default();

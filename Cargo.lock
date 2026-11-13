@@ -3149,6 +3149,7 @@ dependencies = [
  "ron",
  "rsa",
  "rust-ini",
+ "serde",
  "serde_json",
  "soup3",
  "strum",
