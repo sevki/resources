@@ -21,6 +21,13 @@ gh run download "$run" --name screenshots --dir "$tmp"
 for golden in "$here"/golden/*.png; do
     name="$(basename "$golden")"
     [[ -f "$tmp/$name" ]] || { echo "run has no $name" >&2; exit 1; }
+    # PNGs of identical pixels still differ in bytes (embedded timestamps),
+    # don't touch those, it would only add noise to the diff
+    if command -v compare >/dev/null \
+        && [[ "$(compare -metric AE -fuzz 1% "$tmp/$name" "$golden" null: 2>&1 || true)" == "0" ]]; then
+        echo "unchanged $name"
+        continue
+    fi
     cp "$tmp/$name" "$golden"
     echo "updated $name"
 done
