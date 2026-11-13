@@ -37,18 +37,25 @@ pub const HELPER_PATH_ENV: &str = "RESOURCES_PROCESSES_BIN";
 
 /// Builds the command that runs `resources-processes` with `args`: on the
 /// host via `flatpak-spawn` inside Flatpak (which can see all processes),
-/// directly otherwise.
+/// directly otherwise. If [`HELPER_PATH_ENV`] is set, that binary is always
+/// run directly (also inside Flatpak, e.g. when the tests run in the build
+/// sandbox, where there is no host to spawn on).
 pub fn helper_command(args: &[&str]) -> Command {
-    let proxy_path = std::env::var(HELPER_PATH_ENV).unwrap_or_else(|_| {
-        if *IS_FLATPAK {
-            format!(
-                "{}/libexec/resources/resources-processes",
-                FLATPAK_APP_PATH.as_str()
-            )
-        } else {
-            format!("{LIBEXECDIR}/resources-processes")
-        }
-    });
+    if let Ok(path) = std::env::var(HELPER_PATH_ENV) {
+        debug!("Running {path} directly ({})", args.join(" "));
+        let mut command = Command::new(path);
+        command.args(args);
+        return command;
+    }
+
+    let proxy_path = if *IS_FLATPAK {
+        format!(
+            "{}/libexec/resources/resources-processes",
+            FLATPAK_APP_PATH.as_str()
+        )
+    } else {
+        format!("{LIBEXECDIR}/resources-processes")
+    };
 
     if *IS_FLATPAK {
         let runtime_path = FLATPAK_RUNTIME_PATH

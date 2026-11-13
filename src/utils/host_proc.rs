@@ -19,14 +19,23 @@ use process_data::details::{
 use serde::de::DeserializeOwned;
 
 use crate::devices::process::helper_command;
-use crate::utils::IS_FLATPAK;
 
 /// Set (to anything) to use the helper even outside of Flatpak, for testing.
 pub const FORCE_HELPER_ENV: &str = "RESOURCES_PROC_VIA_HELPER";
 
 /// Whether process details have to be asked from the helper.
 pub fn via_helper() -> bool {
-    *IS_FLATPAK || std::env::var_os(FORCE_HELPER_ENV).is_some()
+    // The unit tests read /proc directly wherever they run: the build
+    // sandbox of Flatpak counts as Flatpak but has no helper to ask. The
+    // helper path is tested by `tests/host_helper.rs`, which forces it.
+    #[cfg(test)]
+    {
+        std::env::var_os(FORCE_HELPER_ENV).is_some()
+    }
+    #[cfg(not(test))]
+    {
+        *crate::utils::IS_FLATPAK || std::env::var_os(FORCE_HELPER_ENV).is_some()
+    }
 }
 
 fn query<T: DeserializeOwned>(
