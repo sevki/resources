@@ -56,6 +56,7 @@ yara-x = "1.23.0"
 # feature that rsa 0.10.0 made opt-in, so it only compiles if somebody else
 # turns it on. Remove once yara-x does it itself.
 rsa = { version = "0.10.0", features = ["pkcs1v15"] }
+oo7 = { version = "0.7.1", default-features = false, features = ["async-std", "native_crypto"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

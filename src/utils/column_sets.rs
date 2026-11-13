@@ -8,7 +8,7 @@
 use serde_json::{Value, json};
 
 /// All settings keys that toggle a column of the Processes view.
-pub const COLUMN_KEYS: [&str; 19] = [
+pub const COLUMN_KEYS: [&str; 20] = [
     "processes-show-id",
     "processes-show-user",
     "processes-show-memory",
@@ -28,6 +28,7 @@ pub const COLUMN_KEYS: [&str; 19] = [
     "processes-show-swap",
     "processes-show-combined-memory",
     "processes-show-commandline",
+    "processes-show-virustotal",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -220,6 +220,18 @@
           </object>
         </child>
         <child>
+          <object class="AdwPreferencesGroup" id="virustotal_group">
+            <property name="title" translatable="yes">VirusTotal</property>
+            <property name="description" translatable="yes">Checking a process looks up the SHA-256 hash of its executable on VirusTotal; the file itself is never uploaded. A free API key allows 4 lookups per minute. Enter a new key to replace the saved one, or apply an empty one to remove it.</property>
+            <child>
+              <object class="AdwPasswordEntryRow" id="virustotal_key_row">
+                <property name="title" translatable="yes">API Key</property>
+                <property name="show-apply-button">true</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
           <object class="AdwPreferencesGroup" id="column_sets_group">
             <property name="title" translatable="yes">Column Sets</property>
             <property name="description" translatable="yes">Save the currently selected information columns under a name to switch between them quickly</property>
@@ -327,6 +339,11 @@
             <child>
               <object class="AdwSwitchRow" id="processes_show_commandline_row">
                 <property name="title" translatable="yes">Commandline</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwSwitchRow" id="processes_show_virustotal_row">
+                <property name="title" translatable="yes">VirusTotal Detections</property>
               </object>
             </child>
           </object>

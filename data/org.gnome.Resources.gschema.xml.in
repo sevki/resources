@@ -195,6 +195,10 @@
       <default>true</default>
       <summary>Sort direction for the Applications column view</summary>
     </key>
+    <key name="processes-show-virustotal" type="b">
+      <default>false</default>
+      <summary>Display VirusTotal detections in Processes view</summary>
+    </key>
     <key name="processes-tree-view" type="b">
       <default>false</default>
       <summary>Show processes as a tree according to their parent/child relationship</summary>

@@ -34,6 +34,7 @@ use crate::ui::widgets::stack_sidebar_item::UsageLabels;
 use crate::ui::window::{Action, MainWindow};
 use crate::utils::NUM_CPUS;
 use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
+use crate::utils::secrets;
 use crate::utils::settings::SETTINGS;
 use crate::utils::units::{convert_speed, convert_storage, format_time};
 
@@ -140,6 +141,8 @@ mod imp {
         /// that processes already running at startup don't count as "new"
         pub populated: Cell<bool>,
         pub tree_active: Cell<bool>,
+        /// VirusTotal detections per pid, shown in the VirusTotal column
+        pub virustotal_results: RefCell<std::collections::HashMap<i32, String>>,
 
         #[property(get)]
         uses_meter: Cell<bool>,
@@ -212,6 +215,7 @@ mod imp {
                 collapsed_pids: Default::default(),
                 populated: Default::default(),
                 tree_active: Default::default(),
+                virustotal_results: Default::default(),
                 graph_locked_max_y: Cell::new(true),
                 primary_ord: Cell::new(PROCESSES_PRIMARY_ORD),
                 secondary_ord: Default::default(),
@@ -584,6 +588,16 @@ impl ResProcesses {
         let details_pane =
             DetailsPane::new(DetailsMode::from_index(SETTINGS.processes_details_mode()));
         details_pane.widget().set_size_request(-1, 220);
+        details_pane.connect_virustotal_result(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |pid, detections| {
+                this.imp()
+                    .virustotal_results
+                    .borrow_mut()
+                    .insert(pid, detections);
+            }
+        ));
         details_pane.connect_mode_changed(|mode| {
             let _ = SETTINGS.set_processes_details_mode(mode.index());
         });
@@ -896,6 +910,20 @@ impl ResProcesses {
             settings_show: processes_show_commandline,
             settings_connect: connect_processes_show_commandline,
         ));
+
+        columns.push(add_column!(
+            this: self,
+            column_view: column_view,
+            entry_type: ProcessEntry,
+            title: i18n("VirusTotal"),
+            property: virustotal,
+            value_type: String,
+            min_chars: 8,
+            sorter: string,
+            convert: |v: String| v,
+            settings_show: processes_show_virustotal,
+            settings_connect: connect_processes_show_virustotal,
+        ));
     }
 
     pub fn setup_signals(&self) {
@@ -1167,9 +1195,38 @@ impl ResProcesses {
         }
     }
 
-    /// Hashes the process' executable and opens its VirusTotal report. Only
-    /// the hash is sent to VirusTotal, not the file.
+    /// Checks the process on VirusTotal: with the API when a key is saved
+    /// (shown in the details pane), otherwise by opening the report page of
+    /// its executable's hash in the browser. Only the hash is sent, never
+    /// the file.
     pub fn check_virustotal(&self, process: &ProcessEntry) {
+        let process = process.clone();
+        glib::spawn_future_local(clone!(
+            #[weak(rename_to = this)]
+            self,
+            async move {
+                if matches!(secrets::virustotal_key().await, Ok(Some(_))) {
+                    this.check_virustotal_with_api(&process);
+                } else {
+                    this.open_virustotal_report(&process);
+                }
+            }
+        ));
+    }
+
+    fn check_virustotal_with_api(&self, process: &ProcessEntry) {
+        let _ = SETTINGS.set_processes_show_details(true);
+
+        if let Some(pane) = &*self.imp().details_pane.borrow() {
+            pane.widget().set_visible(true);
+            pane.show_mode(DetailsMode::VirusTotal);
+            pane.set_pid(Some(process.pid()));
+            pane.scan();
+        }
+    }
+
+    /// Opens the VirusTotal report page of the process' executable.
+    fn open_virustotal_report(&self, process: &ProcessEntry) {
         let pid = process.pid();
         glib::spawn_future_local(clone!(
             #[weak(rename_to = this)]
@@ -1519,6 +1576,11 @@ impl ResProcesses {
             let gone = match (apps_context.get_process(item_pid), object.ended_at()) {
                 (Some(process), None) => {
                     object.update(process);
+                    if let Some(detections) = imp.virustotal_results.borrow().get(&item_pid)
+                        && object.virustotal() != *detections
+                    {
+                        object.set_virustotal(detections.clone());
+                    }
                     if let Some((dialog_pid, dialog)) = &*info_dialog_opt
                         && *dialog_pid == item_pid
                     {
@@ -1554,6 +1616,7 @@ impl ResProcesses {
                 *imp.popped_over_process.borrow_mut() = None;
                 imp.popover_menu.set_visible(false);
                 imp.collapsed_pids.borrow_mut().remove(&item_pid);
+                imp.virustotal_results.borrow_mut().remove(&item_pid);
                 pids_to_remove.insert(item_pid);
             }
         });

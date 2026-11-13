@@ -14,10 +14,13 @@ use process_data::details::{self, FdKind};
 
 use crate::utils::TICK_RATE;
 use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
+use crate::utils::secrets;
 use crate::utils::units::{convert_storage, format_time};
+use crate::utils::virustotal::{self, Lookup};
 use crate::utils::yara::{self, ScanReport};
 
 type ModeCallback = Box<dyn Fn(DetailsMode)>;
+type VirusTotalCallback = Box<dyn Fn(libc::pid_t, String)>;
 
 /// Maximum number of columns any mode uses
 const MAX_COLUMNS: usize = 4;
@@ -31,10 +34,11 @@ pub enum DetailsMode {
     Environment,
     Security,
     Yara,
+    VirusTotal,
 }
 
 impl DetailsMode {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Libraries,
         Self::Files,
         Self::Network,
@@ -42,7 +46,13 @@ impl DetailsMode {
         Self::Environment,
         Self::Security,
         Self::Yara,
+        Self::VirusTotal,
     ];
+
+    /// Modes whose data is fetched on request (a button), not on every refresh.
+    pub fn is_on_demand(self) -> bool {
+        matches!(self, Self::Yara | Self::VirusTotal)
+    }
 
     pub fn from_index(index: u32) -> Self {
         Self::ALL
@@ -65,6 +75,7 @@ impl DetailsMode {
             Self::Security => i18n("Security"),
             // not translated, it's the name of the tool
             Self::Yara => "YARA".to_string(),
+            Self::VirusTotal => "VirusTotal".to_string(),
         }
     }
 
@@ -87,6 +98,7 @@ impl DetailsMode {
             Self::Environment => vec![i18n("Variable"), i18n("Value")],
             Self::Security => vec![i18n("Property"), i18n("Value")],
             Self::Yara => vec![i18n("Rule"), i18n("Tags"), i18n("File")],
+            Self::VirusTotal => vec![i18n("Property"), i18n("Value")],
         }
     }
 
@@ -143,7 +155,7 @@ impl DetailsMode {
                 .map(|(name, value)| vec![name, value])
                 .collect(),
             // scanning takes long, so it's done on request, see `DetailsPane::scan`
-            Self::Yara => Vec::new(),
+            Self::Yara | Self::VirusTotal => Vec::new(),
             Self::Security => {
                 let info = details::read_security(pid)?;
                 let join = |items: &[String]| {
@@ -200,6 +212,77 @@ impl DetailsMode {
     }
 }
 
+/// Looks the executable of a process up on VirusTotal.
+async fn virustotal_outcome(pid: libc::pid_t) -> YaraOutcome {
+    let key = match secrets::virustotal_key().await {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return YaraOutcome::message(i18n(
+                "No VirusTotal API key. Add one in Preferences → Processes → VirusTotal",
+            ));
+        }
+        Err(error) => {
+            return YaraOutcome::message(i18n_f(
+                "Could not read the API key from the keyring: {}",
+                &[&error],
+            ));
+        }
+    };
+
+    let executable = gio::spawn_blocking(move || {
+        let path = std::fs::read_link(format!("/proc/{pid}/exe"))?;
+        let hash = process_data::hash::sha256_file_hex(format!("/proc/{pid}/exe"))?;
+        Ok::<_, std::io::Error>((path, hash))
+    })
+    .await;
+    let Ok(Ok((path, hash))) = executable else {
+        return YaraOutcome::message(i18n("Could not read the executable of this process"));
+    };
+
+    let property = |name: String, value: String| format!("{}\t{}", clean(&name), clean(&value));
+    let mut rows = vec![
+        property(i18n("File"), path.to_string_lossy().to_string()),
+        property(i18n("SHA-256"), hash.clone()),
+    ];
+
+    match virustotal::check(&hash, &key).await {
+        Ok(Lookup::Found(reputation)) => {
+            let checked = glib::DateTime::from_unix_local(reputation.checked_at)
+                .ok()
+                .and_then(|date| date.format("%x %X").ok())
+                .map(|date| date.to_string())
+                .unwrap_or_default();
+            rows.push(property(i18n("Detections"), reputation.summary()));
+            rows.push(property(i18n("Report"), reputation.permalink.clone()));
+            rows.push(property(i18n("Checked"), checked));
+            YaraOutcome {
+                rows,
+                summary: i18n_f("VirusTotal — {} detections", &[&reputation.summary()]),
+                problems: String::new(),
+                column: Some(reputation.summary()),
+            }
+        }
+        Ok(Lookup::Unknown) => {
+            rows.push(property(
+                i18n("Detections"),
+                i18n("Not known to VirusTotal"),
+            ));
+            YaraOutcome {
+                rows,
+                summary: i18n("VirusTotal — this file is not known"),
+                problems: String::new(),
+                column: Some(i18n("Unknown")),
+            }
+        }
+        Err(error) => YaraOutcome {
+            rows,
+            summary: error.message(),
+            problems: String::new(),
+            column: None,
+        },
+    }
+}
+
 /// The widget itself. Cheap to clone, all clones share state.
 #[derive(Clone)]
 pub struct DetailsPane {
@@ -216,13 +299,17 @@ struct Inner {
     shown: RefCell<Option<Vec<String>>>,
     title: gtk::Label,
     on_mode_changed: RefCell<Option<ModeCallback>>,
-    /// mode selector buttons, in the order of `DetailsMode::ALL`
-    mode_buttons: RefCell<Vec<gtk::ToggleButton>>,
+    /// mode selector, its items are in the order of `DetailsMode::ALL`
+    mode_selector: RefCell<Option<gtk::DropDown>>,
     scan_button: gtk::Button,
     rules_button: gtk::Button,
+    memory_button: gtk::Button,
     scanning: Cell<bool>,
     /// results of the last YARA scan of each process
     yara_results: RefCell<HashMap<libc::pid_t, YaraOutcome>>,
+    /// results of the last VirusTotal check of each process
+    virustotal_results: RefCell<HashMap<libc::pid_t, YaraOutcome>>,
+    on_virustotal_result: RefCell<Option<VirusTotalCallback>>,
 }
 
 /// What a YARA scan of one process found, ready to be shown.
@@ -232,6 +319,19 @@ struct YaraOutcome {
     summary: String,
     /// rule files that failed to compile, one per line
     problems: String,
+    /// text for the VirusTotal column of the process list
+    column: Option<String>,
+}
+
+impl YaraOutcome {
+    fn message(summary: String) -> Self {
+        Self {
+            rows: Vec::new(),
+            summary,
+            problems: String::new(),
+            column: None,
+        }
+    }
 }
 
 /// One line per rule file that failed to compile.
@@ -253,20 +353,59 @@ fn clean(field: &str) -> String {
     field.replace(['\t', '\n'], " ")
 }
 
-/// Tab-separated rows (rule, tags, file) for a scan report.
-fn yara_rows(report: &ScanReport) -> Vec<String> {
-    report
-        .matches
+/// Tab-separated rows (rule, tags, where) for matches.
+fn yara_rows(matches: &[yara::YaraMatch]) -> Vec<String> {
+    matches
         .iter()
         .map(|found| {
             format!(
                 "{}\t{}\t{}",
                 clean(&found.rule),
                 clean(&found.tags.join(", ")),
-                clean(&found.file.to_string_lossy())
+                clean(&found.target.to_string())
             )
         })
         .collect()
+}
+
+fn yara_memory_summary(report: &yara::MemoryReport) -> String {
+    if report.denied {
+        return i18n(
+            "Access to the memory of this process was denied. Scanning memory needs a process of your own with ptrace allowed (kernel.yama.ptrace_scope=0) or root.",
+        );
+    }
+
+    let mut summary = format!(
+        "YARA (memory) — {}; {}, {:.1} MiB",
+        ni18n_f(
+            "{} match",
+            "{} matches",
+            report.matches.len() as u32,
+            &[&report.matches.len().to_string()]
+        ),
+        ni18n_f(
+            "{} region scanned",
+            "{} regions scanned",
+            report.regions_scanned as u32,
+            &[&report.regions_scanned.to_string()]
+        ),
+        report.bytes_scanned as f64 / (1024.0 * 1024.0),
+    );
+    if report.regions_failed > 0 {
+        summary.push_str(&format!(
+            " ({} {})",
+            report.regions_failed,
+            i18n("unreadable")
+        ));
+    }
+    if report.regions_skipped > 0 {
+        summary.push_str(&format!(
+            " ({} {})",
+            report.regions_skipped,
+            i18n("skipped, too big")
+        ));
+    }
+    summary
 }
 
 fn yara_summary(report: &ScanReport) -> String {
@@ -370,41 +509,37 @@ impl DetailsPane {
             shown: RefCell::new(None),
             title,
             on_mode_changed: RefCell::new(None),
-            mode_buttons: RefCell::new(Vec::new()),
+            mode_selector: RefCell::new(None),
             scan_button: gtk::Button::with_label(&i18n("Scan")),
             rules_button: gtk::Button::from_icon_name("folder-open-symbolic"),
+            memory_button: gtk::Button::with_label(&i18n("Scan Memory")),
             scanning: Cell::new(false),
             yara_results: RefCell::new(HashMap::new()),
+            virustotal_results: RefCell::new(HashMap::new()),
+            on_virustotal_result: RefCell::new(None),
         });
         let this = Self { inner };
 
-        // mode selector
-        let selector = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        selector.add_css_class("linked");
-        let mut group: Option<gtk::ToggleButton> = None;
-        for mode in DetailsMode::ALL {
-            let button = gtk::ToggleButton::with_label(&mode.label());
-            button.set_active(mode == initial_mode);
-            if let Some(group) = &group {
-                button.set_group(Some(group));
-            } else {
-                group = Some(button.clone());
-            }
-            button.connect_toggled(clone!(
-                #[strong]
-                this,
-                move |button| {
-                    if button.is_active() {
-                        this.set_mode(mode);
-                        if let Some(callback) = &*this.inner.on_mode_changed.borrow() {
-                            callback(mode);
-                        }
+        // mode selector, a dropdown as there are too many modes for tabs
+        let labels: Vec<String> = DetailsMode::ALL.iter().map(|mode| mode.label()).collect();
+        let selector =
+            gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+        selector.set_selected(initial_mode.index());
+        selector.set_tooltip_text(Some(&i18n("Which details to show")));
+        selector.connect_selected_notify(clone!(
+            #[strong]
+            this,
+            move |dropdown| {
+                let mode = DetailsMode::from_index(dropdown.selected());
+                if this.inner.mode.get() != mode {
+                    this.set_mode(mode);
+                    if let Some(callback) = &*this.inner.on_mode_changed.borrow() {
+                        callback(mode);
                     }
                 }
-            ));
-            selector.append(&button);
-            this.inner.mode_buttons.borrow_mut().push(button);
-        }
+            }
+        ));
+        *this.inner.mode_selector.borrow_mut() = Some(selector.clone());
 
         this.inner.scan_button.add_css_class("suggested-action");
         this.inner.scan_button.set_tooltip_text(Some(&i18n(
@@ -414,6 +549,14 @@ impl DetailsPane {
             #[strong]
             this,
             move |_| this.scan()
+        ));
+        this.inner.memory_button.set_tooltip_text(Some(&i18n(
+            "Scan the heap, stack and other memory of this process with the YARA rules",
+        )));
+        this.inner.memory_button.connect_clicked(clone!(
+            #[strong]
+            this,
+            move |_| this.scan_yara(true)
         ));
         this.inner
             .rules_button
@@ -434,6 +577,7 @@ impl DetailsPane {
         spacer.set_hexpand(true);
         header.append(&spacer);
         header.append(&this.inner.rules_button);
+        header.append(&this.inner.memory_button);
         header.append(&this.inner.scan_button);
 
         this.inner.root.append(&header);
@@ -471,17 +615,14 @@ impl DetailsPane {
         }
     }
 
-    /// Switches to a mode like the user clicking on its button, i.e. the
-    /// selector follows and the change is reported to the callback.
+    /// Switches to a mode like the user choosing it, i.e. the selector
+    /// follows and the change is reported to the callback.
     pub fn show_mode(&self, mode: DetailsMode) {
-        let button = self
-            .inner
-            .mode_buttons
-            .borrow()
-            .get(mode.index() as usize)
-            .cloned();
-        match button {
-            Some(button) if !button.is_active() => button.set_active(true),
+        let selector = self.inner.mode_selector.borrow().clone();
+        match selector {
+            Some(selector) if selector.selected() != mode.index() => {
+                selector.set_selected(mode.index());
+            }
             _ => self.set_mode(mode),
         }
     }
@@ -496,9 +637,25 @@ impl DetailsPane {
     }
 
     fn apply_headers(&self) {
-        let is_yara = self.inner.mode.get() == DetailsMode::Yara;
-        self.inner.scan_button.set_visible(is_yara);
+        let mode = self.inner.mode.get();
+        let is_yara = mode == DetailsMode::Yara;
+        self.inner.scan_button.set_visible(mode.is_on_demand());
         self.inner.rules_button.set_visible(is_yara);
+        self.inner.memory_button.set_visible(is_yara);
+        match mode {
+            DetailsMode::VirusTotal => {
+                self.inner.scan_button.set_label(&i18n("Check"));
+                self.inner.scan_button.set_tooltip_text(Some(&i18n(
+                    "Look up the executable of this process on VirusTotal",
+                )));
+            }
+            _ => {
+                self.inner.scan_button.set_label(&i18n("Scan"));
+                self.inner.scan_button.set_tooltip_text(Some(&i18n(
+                    "Scan the executable and libraries of this process with the YARA rules",
+                )));
+            }
+        }
 
         let headers = self.inner.mode.get().headers();
         for (index, column) in self.inner.columns.iter().enumerate() {
@@ -511,7 +668,7 @@ impl DetailsPane {
                 (DetailsMode::Security | DetailsMode::Environment, 0) => 260,
                 (DetailsMode::Network, 1 | 2) => 200,
                 (DetailsMode::Threads, 1) => 200,
-                (DetailsMode::Yara, 0) => 260,
+                (DetailsMode::Yara | DetailsMode::VirusTotal, 0) => 260,
                 (DetailsMode::Yara, 1) => 160,
                 _ if index + 1 == headers.len() => -1,
                 _ => 110,
@@ -522,6 +679,48 @@ impl DetailsPane {
     /// Scans the shown process with the rules in the rules directory. The
     /// rules are loaded anew every time, so changes to them are picked up.
     pub fn scan(&self) {
+        if self.inner.mode.get() == DetailsMode::VirusTotal {
+            self.check_virustotal();
+        } else {
+            self.scan_yara(false);
+        }
+    }
+
+    pub fn connect_virustotal_result(&self, callback: impl Fn(libc::pid_t, String) + 'static) {
+        *self.inner.on_virustotal_result.borrow_mut() = Some(Box::new(callback));
+    }
+
+    fn check_virustotal(&self) {
+        let inner = &self.inner;
+        let Some(pid) = inner.pid.get() else {
+            return;
+        };
+        if inner.scanning.replace(true) {
+            return;
+        }
+        self.refresh();
+
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let outcome = virustotal_outcome(pid).await;
+
+            this.inner.scanning.set(false);
+            if let (Some(text), Some(callback)) =
+                (&outcome.column, &*this.inner.on_virustotal_result.borrow())
+            {
+                callback(pid, text.clone());
+            }
+            this.inner
+                .virustotal_results
+                .borrow_mut()
+                .insert(pid, outcome);
+            *this.inner.shown.borrow_mut() = None;
+            this.inner.scan_button.set_sensitive(true);
+            this.refresh();
+        });
+    }
+
+    fn scan_yara(&self, memory: bool) {
         let inner = &self.inner;
         let Some(pid) = inner.pid.get() else {
             return;
@@ -551,11 +750,19 @@ impl DetailsPane {
                         rows: Vec::new(),
                         summary,
                         problems: rule_problems(&rules.errors),
+                        column: None,
                     };
                 }
 
-                let report = yara::scan_process(&rules, pid);
-                let mut summary = yara_summary(&report);
+                let (rows, mut summary) = if memory {
+                    match yara::scan_process_memory(&rules, pid) {
+                        Ok(report) => (yara_rows(&report.matches), yara_memory_summary(&report)),
+                        Err(error) => (Vec::new(), error.to_string()),
+                    }
+                } else {
+                    let report = yara::scan_process(&rules, pid);
+                    (yara_rows(&report.matches), yara_summary(&report))
+                };
                 if !rules.errors.is_empty() {
                     summary.push_str(&format!(
                         " — {}",
@@ -568,9 +775,10 @@ impl DetailsPane {
                     ));
                 }
                 YaraOutcome {
-                    rows: yara_rows(&report),
+                    rows,
                     summary,
                     problems: rule_problems(&rules.errors),
+                    column: None,
                 }
             })
             .await;
@@ -604,18 +812,28 @@ impl DetailsPane {
                 Vec::new(),
                 i18n("Select a single process to see its details"),
             ),
-            Some(pid) if mode == DetailsMode::Yara => {
+            Some(pid) if mode.is_on_demand() => {
                 let scanning = inner.scanning.get();
                 inner.scan_button.set_sensitive(!scanning);
-                match inner.yara_results.borrow().get(&pid) {
-                    _ if scanning => (Vec::new(), i18n("Scanning…")),
+                inner.memory_button.set_sensitive(!scanning);
+                let results = if mode == DetailsMode::Yara {
+                    &inner.yara_results
+                } else {
+                    &inner.virustotal_results
+                };
+                match results.borrow().get(&pid) {
+                    _ if scanning => (Vec::new(), i18n("Working…")),
                     Some(outcome) => {
                         tooltip = outcome.problems.clone();
                         (outcome.rows.clone(), outcome.summary.clone())
                     }
-                    None => (
+                    None if mode == DetailsMode::Yara => (
                         Vec::new(),
                         i18n("Press Scan to check this process with your YARA rules"),
+                    ),
+                    None => (
+                        Vec::new(),
+                        i18n("Press Check to look this process up on VirusTotal"),
                     ),
                 }
             }
@@ -659,13 +877,13 @@ mod tests {
             matches: vec![yara::YaraMatch {
                 rule: "has\ttab".into(),
                 tags: vec!["a".into(), "b".into()],
-                file: "/tmp/with\nnewline".into(),
+                target: yara::Target::File("/tmp/with\nnewline".into()),
             }],
             files_scanned: 3,
             files_failed: 0,
             files_skipped: 0,
         };
-        let rows = yara_rows(&report);
+        let rows = yara_rows(&report.matches);
         assert_eq!(rows, vec!["has tab\ta, b\t/tmp/with newline"]);
         assert_eq!(
             rows[0].split('\t').count(),
@@ -684,6 +902,28 @@ mod tests {
         assert!(summary.contains("0 matches"), "{summary}");
         assert!(summary.contains("2 unreadable"), "{summary}");
         assert!(summary.contains("1 skipped"), "{summary}");
+    }
+
+    #[test]
+    fn yara_memory_summary_explains_denial_and_problems() {
+        let denied = yara::MemoryReport {
+            denied: true,
+            ..Default::default()
+        };
+        assert!(yara_memory_summary(&denied).contains("denied"));
+
+        let report = yara::MemoryReport {
+            regions_scanned: 3,
+            bytes_scanned: 3 * 1024 * 1024,
+            regions_failed: 1,
+            regions_skipped: 2,
+            ..Default::default()
+        };
+        let summary = yara_memory_summary(&report);
+        assert!(summary.contains("3 regions scanned"), "{summary}");
+        assert!(summary.contains("3.0 MiB"), "{summary}");
+        assert!(summary.contains("1 unreadable"), "{summary}");
+        assert!(summary.contains("2 skipped"), "{summary}");
     }
 
     #[test]

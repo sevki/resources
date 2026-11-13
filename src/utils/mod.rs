@@ -9,9 +9,11 @@ use process_data::unix_as_millis;
 pub mod column_sets;
 pub mod i18n;
 pub mod os;
+pub mod secrets;
 pub mod settings;
 pub mod snapd;
 pub mod units;
+pub mod virustotal;
 pub mod yara;
 
 pub const FLATPAK_SPAWN: &str = "/usr/bin/flatpak-spawn";
