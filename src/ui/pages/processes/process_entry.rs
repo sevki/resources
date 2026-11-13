@@ -133,6 +133,10 @@ mod imp {
         #[property(get, set)]
         tree_index: Cell<u32>,
 
+        /// VirusTotal detections of the executable as `positives / total`, empty if not checked
+        #[property(get, set)]
+        virustotal: RefCell<String>,
+
         /// One of `none`, `new`, `ended`, `stopped`, `sandboxed`, `own`, `service`
         #[property(get, set)]
         row_state: RefCell<String>,
@@ -182,6 +186,7 @@ mod imp {
                 hidden: Cell::new(false),
                 tree_index: Cell::new(0),
                 row_state: RefCell::new(String::new()),
+                virustotal: RefCell::new(String::new()),
                 affinity: Default::default(),
                 state: Cell::new('?'),
                 sandboxed: Cell::new(false),

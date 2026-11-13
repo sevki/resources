@@ -6,7 +6,8 @@ use crate::{
     config::DEVLOPMENT_BUILD,
     utils::{
         column_sets,
-        i18n::{i18n, ni18n_f},
+        i18n::{i18n, i18n_f, ni18n_f},
+        secrets,
         settings::{Base, RefreshSpeed, SETTINGS, SidebarMeterType, TemperatureUnit},
     },
 };
@@ -67,6 +68,12 @@ mod imp {
 
         #[template_child]
         pub processes_niceness: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub virustotal_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub virustotal_key_row: TemplateChild<adw::PasswordEntryRow>,
+        #[template_child]
+        pub processes_show_virustotal_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub column_sets_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child]
@@ -184,6 +191,52 @@ impl ResSettingsDialog {
         self.setup_widgets();
         self.setup_signals();
         self.setup_column_sets();
+        self.setup_virustotal_key();
+    }
+
+    fn setup_virustotal_key(&self) {
+        let imp = self.imp();
+
+        self.show_virustotal_key_status();
+
+        imp.virustotal_key_row.connect_apply(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |row| {
+                let key = row.text().to_string();
+                row.set_text("");
+                glib::spawn_future_local(clone!(
+                    #[weak]
+                    this,
+                    async move {
+                        let removing = key.trim().is_empty();
+                        let message = match secrets::set_virustotal_key(Some(&key)).await {
+                            Ok(()) if removing => i18n("API key removed"),
+                            Ok(()) => i18n("API key saved"),
+                            Err(error) => i18n_f("Could not save the API key: {}", &[&error]),
+                        };
+                        this.add_toast(adw::Toast::new(&message));
+                        this.show_virustotal_key_status();
+                    }
+                ));
+            }
+        ));
+    }
+
+    /// Tells whether a key is stored without ever showing it.
+    fn show_virustotal_key_status(&self) {
+        glib::spawn_future_local(clone!(
+            #[weak(rename_to = this)]
+            self,
+            async move {
+                let title = match secrets::virustotal_key().await {
+                    Ok(Some(_)) => i18n("API Key (saved)"),
+                    Ok(None) => i18n("API Key (none saved)"),
+                    Err(_) => i18n("API Key (keyring unavailable)"),
+                };
+                this.imp().virustotal_key_row.set_title(&title);
+            }
+        ));
     }
 
     fn stored_column_sets() -> Vec<column_sets::ColumnSet> {
@@ -321,6 +374,8 @@ impl ResSettingsDialog {
 
         imp.processes_niceness
             .set_active(SETTINGS.detailed_priority());
+        imp.processes_show_virustotal_row
+            .set_active(SETTINGS.processes_show_virustotal());
         imp.processes_tree_view_row
             .set_active(SETTINGS.processes_tree_view());
         imp.processes_row_colors_row
@@ -579,6 +634,11 @@ impl ResSettingsDialog {
         imp.processes_show_commandline_row
             .connect_active_notify(|switch_row| {
                 let _ = SETTINGS.set_processes_show_commandline(switch_row.is_active());
+            });
+
+        imp.processes_show_virustotal_row
+            .connect_active_notify(|switch_row| {
+                let _ = SETTINGS.set_processes_show_virustotal(switch_row.is_active());
             });
 
         imp.processes_tree_view_row

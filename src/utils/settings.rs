@@ -368,6 +368,7 @@ impl Settings {
         processes_show_swap,
         processes_show_combined_memory,
         processes_show_commandline,
+        processes_show_virustotal,
         processes_tree_view,
         processes_show_details,
         processes_row_colors,
