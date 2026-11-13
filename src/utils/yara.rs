@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use process_data::details::Mapping;
 use yara_x::{Compiler, Rules, Scanner, SourceCode};
 
 /// Files bigger than this are not scanned
@@ -62,13 +63,37 @@ impl RuleSet {
     }
 }
 
+/// What a rule matched in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    File(PathBuf),
+    /// A memory region of a process, e.g. `[heap]`
+    Memory {
+        start: u64,
+        end: u64,
+        description: String,
+    },
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "{}", path.display()),
+            Self::Memory {
+                start,
+                end,
+                description,
+            } => write!(f, "[memory] {description} {start:#x}-{end:#x}"),
+        }
+    }
+}
+
 /// A rule that matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YaraMatch {
     pub rule: String,
     pub tags: Vec<String>,
-    /// The file that matched
-    pub file: PathBuf,
+    pub target: Target,
 }
 
 /// Result of scanning a process.
@@ -173,7 +198,7 @@ fn scan_one(scanner: &mut Scanner<'_>, path: &Path, into: &mut Vec<YaraMatch>) -
                 .tags()
                 .map(|tag| tag.identifier().to_string())
                 .collect(),
-            file: path.to_path_buf(),
+            target: Target::File(path.to_path_buf()),
         });
     }
     Ok(())
@@ -253,10 +278,146 @@ pub fn scan_process(rules: &RuleSet, pid: libc::pid_t) -> ScanReport {
         }
         // report the path as the process sees it
         for found in &mut report.matches[before..] {
-            found.file.clone_from(&shown);
+            found.target = Target::File(shown.clone());
         }
     }
     report
+}
+
+// ----------------------------------------------------------------- memory
+
+/// Regions bigger than this are not scanned
+const MAX_REGION_SIZE: u64 = 128 * 1024 * 1024;
+
+/// Result of scanning the memory of a process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryReport {
+    pub matches: Vec<YaraMatch>,
+    pub regions_scanned: usize,
+    pub bytes_scanned: u64,
+    /// Regions that couldn't be read (e.g. unmapped meanwhile)
+    pub regions_failed: usize,
+    /// Regions that are too big
+    pub regions_skipped: usize,
+    /// The memory of the process may not be read at all (needs the same user
+    /// with ptrace allowed, or root)
+    pub denied: bool,
+}
+
+/// Whether a mapping is worth scanning as memory. File-backed read-only
+/// mappings are skipped because their content is what the file scan sees;
+/// anonymous memory, heap, stack, shared memory and writable file mappings
+/// (initialized data) are not.
+pub fn is_scannable_region(region: &Mapping) -> bool {
+    if !region.readable() || region.size() == 0 {
+        return false;
+    }
+    let path = region.path.as_str();
+    match path {
+        "" => true,
+        // kernel provided, can't be read like normal memory
+        "[vvar]" | "[vvar_vclock]" | "[vsyscall]" | "[uprobes]" => false,
+        _ if path.starts_with('[') => true,
+        _ if path.starts_with("/memfd:") || path.starts_with("/SYSV") => true,
+        // devices (e.g. GPU memory) can have side effects when read
+        _ if path.starts_with("/dev/") && !path.starts_with("/dev/shm/") => false,
+        _ => region.writable(),
+    }
+}
+
+fn describe_region(region: &Mapping) -> String {
+    let kind = if region.path.is_empty() {
+        "anonymous".to_string()
+    } else {
+        region.path.clone()
+    };
+    format!("{kind} {}", region.perms)
+}
+
+/// Reads up to `len` bytes at `offset`, stopping early at the first error.
+fn read_region(mem: &std::fs::File, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+    use std::os::unix::fs::FileExt;
+
+    let mut buffer = vec![0u8; len];
+    let mut filled = 0;
+    while filled < len {
+        match mem.read_at(&mut buffer[filled..], offset + filled as u64) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if filled == 0 => return Err(error),
+            Err(_) => break,
+        }
+    }
+    buffer.truncate(filled);
+    Ok(buffer)
+}
+
+/// Scans the memory of a process. Unlike files, memory can only be read when
+/// the kernel allows tracing the process, which is the case for processes of
+/// the same user if `ptrace_scope` is 0 (and for children), and for root.
+///
+/// A process can't scan itself: its own memory contains the compiled rules,
+/// which would match themselves.
+pub fn scan_process_memory(rules: &RuleSet, pid: libc::pid_t) -> Result<MemoryReport> {
+    anyhow::ensure!(
+        pid != std::process::id() as libc::pid_t,
+        "a process can't scan its own memory, the rules in it would match themselves"
+    );
+
+    let mut report = MemoryReport::default();
+    if rules.is_empty() {
+        return Ok(report);
+    }
+
+    let regions = process_data::details::read_mappings(pid)?;
+    let mem = match std::fs::File::open(format!("/proc/{pid}/mem")) {
+        Ok(mem) => mem,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            report.denied = true;
+            return Ok(report);
+        }
+        Err(error) => return Err(error).context("can't open the memory of the process"),
+    };
+
+    let mut scanner = new_scanner(rules);
+    for region in regions.iter().filter(|region| is_scannable_region(region)) {
+        if region.size() > MAX_REGION_SIZE {
+            report.regions_skipped += 1;
+            continue;
+        }
+
+        let data = match read_region(&mem, region.start, region.size() as usize) {
+            Ok(data) if !data.is_empty() => data,
+            Ok(_) | Err(_) => {
+                report.regions_failed += 1;
+                continue;
+            }
+        };
+
+        match scanner.scan(&data) {
+            Ok(results) => {
+                report.regions_scanned += 1;
+                report.bytes_scanned += data.len() as u64;
+                for rule in results.matching_rules() {
+                    report.matches.push(YaraMatch {
+                        rule: rule.identifier().to_string(),
+                        tags: rule
+                            .tags()
+                            .map(|tag| tag.identifier().to_string())
+                            .collect(),
+                        target: Target::Memory {
+                            start: region.start,
+                            end: region.end,
+                            description: describe_region(region),
+                        },
+                    });
+                }
+            }
+            Err(_) => report.regions_failed += 1,
+        }
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -330,7 +491,7 @@ mod tests {
         assert_eq!(matches.len(), 2);
         assert!(matches.iter().all(|m| m.rule == "has_needle"));
         assert_eq!(matches[0].tags, vec!["suspicious", "test"]);
-        assert_eq!(matches[0].file, target);
+        assert_eq!(matches[0].target, Target::File(target));
 
         let clean = dir.write("clean.bin", "nothing to see");
         assert!(scan_file(&set, &clean).unwrap().is_empty());
@@ -391,7 +552,7 @@ mod tests {
             report
                 .matches
                 .iter()
-                .any(|m| m.rule == "elf" && m.file == exe),
+                .any(|m| m.rule == "elf" && m.target == Target::File(exe.clone())),
             "{report:?}"
         );
     }
@@ -428,5 +589,112 @@ mod tests {
         let report = scan_process(&set, i32::MAX);
         assert!(report.matches.is_empty());
         assert_eq!(report.files_scanned, 0);
+    }
+
+    fn region(perms: &str, path: &str) -> Mapping {
+        Mapping {
+            start: 0x1000,
+            end: 0x3000,
+            perms: perms.into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn region_selection() {
+        assert!(is_scannable_region(&region("rw-p", "")));
+        assert!(is_scannable_region(&region("rw-p", "[heap]")));
+        assert!(is_scannable_region(&region("rw-p", "[stack]")));
+        assert!(is_scannable_region(&region("rw-s", "/memfd:foo (deleted)")));
+        assert!(is_scannable_region(&region("rw-s", "/dev/shm/x")));
+        // initialized data of a library, but not its read-only code
+        assert!(is_scannable_region(&region("rw-p", "/usr/lib/libc.so.6")));
+        assert!(!is_scannable_region(&region("r-xp", "/usr/lib/libc.so.6")));
+        assert!(!is_scannable_region(&region("r--p", "/usr/lib/libc.so.6")));
+        // not readable or special
+        assert!(!is_scannable_region(&region("---p", "")));
+        assert!(!is_scannable_region(&region("r--p", "[vvar]")));
+        assert!(!is_scannable_region(&region("--xp", "[vsyscall]")));
+        assert!(!is_scannable_region(&region("rw-s", "/dev/dri/card0")));
+        let mut empty = region("rw-p", "");
+        empty.end = empty.start;
+        assert!(!is_scannable_region(&empty));
+    }
+
+    #[test]
+    fn target_display() {
+        assert_eq!(Target::File("/bin/ls".into()).to_string(), "/bin/ls");
+        assert_eq!(
+            Target::Memory {
+                start: 0x1000,
+                end: 0x2000,
+                description: "[heap] rw-p".into()
+            }
+            .to_string(),
+            "[memory] [heap] rw-p 0x1000-0x2000"
+        );
+    }
+
+    #[test]
+    fn finds_strings_in_the_memory_of_another_process() {
+        let dir = TempDir::new("memory");
+        dir.write(
+            "mem.yar",
+            r#"rule marker { strings: $a = "memory-marker-9f3b2c71" condition: $a }"#,
+        );
+        let set = load_rules(&dir.0);
+
+        // the marker is in the environment of the child, which lives in its
+        // stack memory
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("RES_YARA_TEST", "memory-marker-9f3b2c71")
+            .spawn()
+            .expect("can't start sleep");
+        let pid = child.id() as libc::pid_t;
+        // wait until it has exec'd
+        while std::fs::read_link(format!("/proc/{pid}/exe"))
+            .is_ok_and(|exe| exe.file_name().is_none_or(|name| name != "sleep"))
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let report = scan_process_memory(&set, pid);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let report = report.unwrap();
+        assert!(!report.denied, "{report:?}");
+        assert!(report.regions_scanned >= 1, "{report:?}");
+        assert!(report.bytes_scanned > 0);
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|m| m.rule == "marker" && matches!(m.target, Target::Memory { .. })),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn scanning_the_own_process_is_refused() {
+        let dir = TempDir::new("self");
+        dir.write("r.yar", NEEDLE_RULE);
+        let set = load_rules(&dir.0);
+        assert!(scan_process_memory(&set, std::process::id() as libc::pid_t).is_err());
+    }
+
+    #[test]
+    fn empty_rules_and_dead_processes_are_fine() {
+        let empty = load_rules(Path::new("/definitely/not/here"));
+        assert_eq!(
+            scan_process_memory(&empty, 1).unwrap(),
+            MemoryReport::default()
+        );
+
+        let dir = TempDir::new("dead-memory");
+        dir.write("r.yar", NEEDLE_RULE);
+        let set = load_rules(&dir.0);
+        assert!(scan_process_memory(&set, i32::MAX).is_err());
     }
 }

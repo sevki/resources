@@ -75,6 +75,62 @@ pub fn parse_maps(maps: &str) -> Vec<MappedFile> {
         .collect()
 }
 
+/// One line of `/proc/<pid>/maps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mapping {
+    pub start: u64,
+    pub end: u64,
+    /// e.g. `rw-p`
+    pub perms: String,
+    /// backing file, or `[heap]`, `[stack]`, …; empty for anonymous memory
+    pub path: String,
+}
+
+impl Mapping {
+    pub fn size(&self) -> u64 {
+        self.end.saturating_sub(self.start)
+    }
+
+    pub fn readable(&self) -> bool {
+        self.perms.starts_with('r')
+    }
+
+    pub fn writable(&self) -> bool {
+        self.perms.chars().nth(1) == Some('w')
+    }
+}
+
+/// Parses every mapping of `/proc/<pid>/maps`, anonymous ones included.
+#[must_use]
+pub fn parse_mappings(maps: &str) -> Vec<Mapping> {
+    maps.lines()
+        .filter_map(|line| {
+            // address perms offset dev inode [path]
+            let mut parts = line.splitn(6, char::is_whitespace);
+            let range = parts.next()?;
+            let perms = parts.next()?;
+            let (start, end) = range.split_once('-')?;
+            let path = line
+                .splitn(6, char::is_whitespace)
+                .nth(5)
+                .map(str::trim)
+                .unwrap_or_default();
+            Some(Mapping {
+                start: u64::from_str_radix(start, 16).ok()?,
+                end: u64::from_str_radix(end, 16).ok()?,
+                perms: perms.to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn read_mappings(pid: libc::pid_t) -> Result<Vec<Mapping>> {
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))
+        .with_context(|| format!("can't read maps of {pid}"))?;
+    Ok(parse_mappings(&maps))
+}
+
 pub fn read_mapped_files(pid: libc::pid_t) -> Result<Vec<MappedFile>> {
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))
         .with_context(|| format!("can't read maps of {pid}"))?;
@@ -580,6 +636,26 @@ mod tests {
         assert_eq!(files[0].perms, "r-x");
         assert_eq!(files[1].path, "/usr/lib/libbar.so.1 (deleted)");
         assert_eq!(files[1].size, 0x2000);
+    }
+
+    #[test]
+    fn parses_raw_mappings() {
+        let maps = "\
+55d0c8a00000-55d0c8a21000 r--p 00000000 08:01 1234 /usr/bin/foo
+55d0c9a00000-55d0c9a21000 rw-p 00000000 00:00 0 [heap]
+7f0000000000-7f0000001000 rw-p 00000000 00:00 0
+garbage line
+ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0 [vsyscall]
+";
+        let mappings = parse_mappings(maps);
+        assert_eq!(mappings.len(), 4);
+        assert_eq!(mappings[0].path, "/usr/bin/foo");
+        assert!(mappings[0].readable() && !mappings[0].writable());
+        assert_eq!(mappings[1].path, "[heap]");
+        assert!(mappings[1].writable());
+        assert_eq!(mappings[2].path, "");
+        assert_eq!(mappings[2].size(), 0x1000);
+        assert!(!mappings[3].readable());
     }
 
     #[test]
