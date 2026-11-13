@@ -12,6 +12,7 @@ pub mod os;
 pub mod settings;
 pub mod snapd;
 pub mod units;
+pub mod yara;
 
 pub const FLATPAK_SPAWN: &str = "/usr/bin/flatpak-spawn";
 

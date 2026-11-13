@@ -4,16 +4,18 @@
 //! properties tabs.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::glib::clone;
+use gtk::glib::{self, clone};
 use gtk::{gio, pango};
 use process_data::details::{self, FdKind};
 
 use crate::utils::TICK_RATE;
-use crate::utils::i18n::i18n;
+use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
 use crate::utils::units::{convert_storage, format_time};
+use crate::utils::yara::{self, ScanReport};
 
 type ModeCallback = Box<dyn Fn(DetailsMode)>;
 
@@ -28,16 +30,18 @@ pub enum DetailsMode {
     Threads,
     Environment,
     Security,
+    Yara,
 }
 
 impl DetailsMode {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Libraries,
         Self::Files,
         Self::Network,
         Self::Threads,
         Self::Environment,
         Self::Security,
+        Self::Yara,
     ];
 
     pub fn from_index(index: u32) -> Self {
@@ -59,6 +63,8 @@ impl DetailsMode {
             Self::Threads => i18n("Threads"),
             Self::Environment => i18n("Environment"),
             Self::Security => i18n("Security"),
+            // not translated, it's the name of the tool
+            Self::Yara => "YARA".to_string(),
         }
     }
 
@@ -80,6 +86,7 @@ impl DetailsMode {
             ],
             Self::Environment => vec![i18n("Variable"), i18n("Value")],
             Self::Security => vec![i18n("Property"), i18n("Value")],
+            Self::Yara => vec![i18n("Rule"), i18n("Tags"), i18n("File")],
         }
     }
 
@@ -135,6 +142,8 @@ impl DetailsMode {
                 .into_iter()
                 .map(|(name, value)| vec![name, value])
                 .collect(),
+            // scanning takes long, so it's done on request, see `DetailsPane::scan`
+            Self::Yara => Vec::new(),
             Self::Security => {
                 let info = details::read_security(pid)?;
                 let join = |items: &[String]| {
@@ -207,6 +216,90 @@ struct Inner {
     shown: RefCell<Option<Vec<String>>>,
     title: gtk::Label,
     on_mode_changed: RefCell<Option<ModeCallback>>,
+    /// mode selector buttons, in the order of `DetailsMode::ALL`
+    mode_buttons: RefCell<Vec<gtk::ToggleButton>>,
+    scan_button: gtk::Button,
+    rules_button: gtk::Button,
+    scanning: Cell<bool>,
+    /// results of the last YARA scan of each process
+    yara_results: RefCell<HashMap<libc::pid_t, YaraOutcome>>,
+}
+
+/// What a YARA scan of one process found, ready to be shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct YaraOutcome {
+    rows: Vec<String>,
+    summary: String,
+    /// rule files that failed to compile, one per line
+    problems: String,
+}
+
+/// One line per rule file that failed to compile.
+fn rule_problems(errors: &[yara::RuleError]) -> String {
+    errors
+        .iter()
+        .map(|error| {
+            format!(
+                "{}: {}",
+                error.file.display(),
+                error.message.lines().next().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn clean(field: &str) -> String {
+    field.replace(['\t', '\n'], " ")
+}
+
+/// Tab-separated rows (rule, tags, file) for a scan report.
+fn yara_rows(report: &ScanReport) -> Vec<String> {
+    report
+        .matches
+        .iter()
+        .map(|found| {
+            format!(
+                "{}\t{}\t{}",
+                clean(&found.rule),
+                clean(&found.tags.join(", ")),
+                clean(&found.file.to_string_lossy())
+            )
+        })
+        .collect()
+}
+
+fn yara_summary(report: &ScanReport) -> String {
+    let mut summary = format!(
+        "YARA — {}; {}",
+        ni18n_f(
+            "{} match",
+            "{} matches",
+            report.matches.len() as u32,
+            &[&report.matches.len().to_string()]
+        ),
+        ni18n_f(
+            "{} file scanned",
+            "{} files scanned",
+            report.files_scanned as u32,
+            &[&report.files_scanned.to_string()]
+        ),
+    );
+    if report.files_failed > 0 {
+        summary.push_str(&format!(
+            " ({} {})",
+            report.files_failed,
+            i18n("unreadable")
+        ));
+    }
+    if report.files_skipped > 0 {
+        summary.push_str(&format!(
+            " ({} {})",
+            report.files_skipped,
+            i18n("skipped, too big")
+        ));
+    }
+    summary
 }
 
 impl DetailsPane {
@@ -277,6 +370,11 @@ impl DetailsPane {
             shown: RefCell::new(None),
             title,
             on_mode_changed: RefCell::new(None),
+            mode_buttons: RefCell::new(Vec::new()),
+            scan_button: gtk::Button::with_label(&i18n("Scan")),
+            rules_button: gtk::Button::from_icon_name("folder-open-symbolic"),
+            scanning: Cell::new(false),
+            yara_results: RefCell::new(HashMap::new()),
         });
         let this = Self { inner };
 
@@ -305,7 +403,26 @@ impl DetailsPane {
                 }
             ));
             selector.append(&button);
+            this.inner.mode_buttons.borrow_mut().push(button);
         }
+
+        this.inner.scan_button.add_css_class("suggested-action");
+        this.inner.scan_button.set_tooltip_text(Some(&i18n(
+            "Scan the executable and libraries of this process with the YARA rules",
+        )));
+        this.inner.scan_button.connect_clicked(clone!(
+            #[strong]
+            this,
+            move |_| this.scan()
+        ));
+        this.inner
+            .rules_button
+            .set_tooltip_text(Some(&i18n("Open the Folder with YARA Rules")));
+        this.inner.rules_button.connect_clicked(clone!(
+            #[strong]
+            this,
+            move |_| this.open_rules_folder()
+        ));
 
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         header.set_margin_top(6);
@@ -313,9 +430,22 @@ impl DetailsPane {
         header.set_margin_start(12);
         header.set_margin_end(12);
         header.append(&selector);
-        header.append(&this.inner.title);
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        header.append(&spacer);
+        header.append(&this.inner.rules_button);
+        header.append(&this.inner.scan_button);
 
         this.inner.root.append(&header);
+        this.inner
+            .root
+            .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        // status line (counts, hints, problems) in its own row so that it has room
+        this.inner.title.set_margin_start(12);
+        this.inner.title.set_margin_end(12);
+        this.inner.title.set_margin_top(4);
+        this.inner.title.set_margin_bottom(4);
+        this.inner.root.append(&this.inner.title);
         this.inner
             .root
             .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -341,6 +471,21 @@ impl DetailsPane {
         }
     }
 
+    /// Switches to a mode like the user clicking on its button, i.e. the
+    /// selector follows and the change is reported to the callback.
+    pub fn show_mode(&self, mode: DetailsMode) {
+        let button = self
+            .inner
+            .mode_buttons
+            .borrow()
+            .get(mode.index() as usize)
+            .cloned();
+        match button {
+            Some(button) if !button.is_active() => button.set_active(true),
+            _ => self.set_mode(mode),
+        }
+    }
+
     /// Sets the process whose details are shown, `None` if no single process
     /// is selected.
     pub fn set_pid(&self, pid: Option<libc::pid_t>) {
@@ -351,6 +496,10 @@ impl DetailsPane {
     }
 
     fn apply_headers(&self) {
+        let is_yara = self.inner.mode.get() == DetailsMode::Yara;
+        self.inner.scan_button.set_visible(is_yara);
+        self.inner.rules_button.set_visible(is_yara);
+
         let headers = self.inner.mode.get().headers();
         for (index, column) in self.inner.columns.iter().enumerate() {
             column.set_visible(index < headers.len());
@@ -362,10 +511,86 @@ impl DetailsPane {
                 (DetailsMode::Security | DetailsMode::Environment, 0) => 260,
                 (DetailsMode::Network, 1 | 2) => 200,
                 (DetailsMode::Threads, 1) => 200,
+                (DetailsMode::Yara, 0) => 260,
+                (DetailsMode::Yara, 1) => 160,
                 _ if index + 1 == headers.len() => -1,
                 _ => 110,
             });
         }
+    }
+
+    /// Scans the shown process with the rules in the rules directory. The
+    /// rules are loaded anew every time, so changes to them are picked up.
+    pub fn scan(&self) {
+        let inner = &self.inner;
+        let Some(pid) = inner.pid.get() else {
+            return;
+        };
+        if inner.scanning.replace(true) {
+            return;
+        }
+        self.refresh();
+
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let dir = yara::rules_dir();
+            let outcome = gio::spawn_blocking(move || {
+                let rules = yara::load_rules(&dir);
+
+                if rules.is_empty() {
+                    let mut summary =
+                        i18n_f("No YARA rules found in {}", &[&dir.to_string_lossy()]);
+                    if let Some(error) = rules.errors.first() {
+                        summary.push_str(&format!(
+                            " — {}: {}",
+                            error.file.display(),
+                            error.message.lines().next().unwrap_or_default()
+                        ));
+                    }
+                    return YaraOutcome {
+                        rows: Vec::new(),
+                        summary,
+                        problems: rule_problems(&rules.errors),
+                    };
+                }
+
+                let report = yara::scan_process(&rules, pid);
+                let mut summary = yara_summary(&report);
+                if !rules.errors.is_empty() {
+                    summary.push_str(&format!(
+                        " — {}",
+                        ni18n_f(
+                            "{} rule file could not be compiled",
+                            "{} rule files could not be compiled",
+                            rules.errors.len() as u32,
+                            &[&rules.errors.len().to_string()],
+                        )
+                    ));
+                }
+                YaraOutcome {
+                    rows: yara_rows(&report),
+                    summary,
+                    problems: rule_problems(&rules.errors),
+                }
+            })
+            .await;
+
+            this.inner.scanning.set(false);
+            if let Ok(outcome) = outcome {
+                this.inner.yara_results.borrow_mut().insert(pid, outcome);
+            }
+            *this.inner.shown.borrow_mut() = None;
+            this.inner.scan_button.set_sensitive(true);
+            this.refresh();
+        });
+    }
+
+    fn open_rules_folder(&self) {
+        let dir = yara::rules_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(&dir)));
+        let window = self.inner.root.root().and_downcast::<gtk::Window>();
+        launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
     }
 
     /// Re-reads the data for the current process and mode.
@@ -373,11 +598,27 @@ impl DetailsPane {
         let inner = &self.inner;
         let mode = inner.mode.get();
 
+        let mut tooltip = String::new();
         let (rows, title): (Vec<String>, String) = match inner.pid.get() {
             None => (
                 Vec::new(),
                 i18n("Select a single process to see its details"),
             ),
+            Some(pid) if mode == DetailsMode::Yara => {
+                let scanning = inner.scanning.get();
+                inner.scan_button.set_sensitive(!scanning);
+                match inner.yara_results.borrow().get(&pid) {
+                    _ if scanning => (Vec::new(), i18n("Scanning…")),
+                    Some(outcome) => {
+                        tooltip = outcome.problems.clone();
+                        (outcome.rows.clone(), outcome.summary.clone())
+                    }
+                    None => (
+                        Vec::new(),
+                        i18n("Press Scan to check this process with your YARA rules"),
+                    ),
+                }
+            }
             Some(pid) => match mode.rows(pid) {
                 Ok(rows) => {
                     let title = format!("{} — {}", mode.label(), rows.len());
@@ -391,6 +632,11 @@ impl DetailsPane {
         };
 
         inner.title.set_text(&title);
+        inner.title.set_tooltip_text(
+            Some(&tooltip)
+                .filter(|text| !text.is_empty())
+                .map(String::as_str),
+        );
 
         if inner.shown.borrow().as_ref() == Some(&rows) {
             return;
@@ -406,6 +652,39 @@ impl DetailsPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yara_rows_are_tab_safe() {
+        let report = ScanReport {
+            matches: vec![yara::YaraMatch {
+                rule: "has\ttab".into(),
+                tags: vec!["a".into(), "b".into()],
+                file: "/tmp/with\nnewline".into(),
+            }],
+            files_scanned: 3,
+            files_failed: 0,
+            files_skipped: 0,
+        };
+        let rows = yara_rows(&report);
+        assert_eq!(rows, vec!["has tab\ta, b\t/tmp/with newline"]);
+        assert_eq!(
+            rows[0].split('\t').count(),
+            DetailsMode::Yara.headers().len()
+        );
+    }
+
+    #[test]
+    fn yara_summary_mentions_problems() {
+        let report = ScanReport {
+            files_failed: 2,
+            files_skipped: 1,
+            ..ScanReport::default()
+        };
+        let summary = yara_summary(&report);
+        assert!(summary.contains("0 matches"), "{summary}");
+        assert!(summary.contains("2 unreadable"), "{summary}");
+        assert!(summary.contains("1 skipped"), "{summary}");
+    }
 
     #[test]
     fn mode_index_roundtrip() {
