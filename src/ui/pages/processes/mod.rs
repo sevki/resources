@@ -1,8 +1,14 @@
+mod details_pane;
 pub mod process_entry;
 mod process_name_cell;
+pub mod row_state;
+pub mod snapshot;
+pub mod tree;
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use adw::ResponseAppearance;
 use adw::{prelude::*, subclass::prelude::*};
@@ -31,8 +37,10 @@ use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
 use crate::utils::settings::SETTINGS;
 use crate::utils::units::{convert_speed, convert_storage, format_time};
 
+use self::details_pane::{DetailsMode, DetailsPane};
 use self::process_entry::ProcessEntry;
 use self::process_name_cell::ResProcessNameCell;
+use self::row_state::{RowInfo, RowState};
 
 pub const TAB_ID: &str = "processes";
 
@@ -91,6 +99,9 @@ mod imp {
         #[template_child]
         pub processes_scrolled_window: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
+        pub details_paned: TemplateChild<gtk::Paned>,
+        pub details_pane: RefCell<Option<DetailsPane>>,
+        #[template_child]
         pub options_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub information_button: TemplateChild<gtk::Button>,
@@ -119,6 +130,16 @@ mod imp {
         pub popped_over_process: RefCell<Option<ProcessEntry>>,
 
         pub columns: RefCell<Vec<ColumnViewColumn>>,
+
+        /// Sorter used by the sort model: tree order in tree mode, the column
+        /// view's sorter otherwise
+        pub custom_sorter: RefCell<Option<gtk::CustomSorter>>,
+        /// Pids whose children are collapsed in tree mode
+        pub collapsed_pids: RefCell<HashSet<i32>>,
+        /// `false` until the list has been populated for the first time, so
+        /// that processes already running at startup don't count as "new"
+        pub populated: Cell<bool>,
+        pub tree_active: Cell<bool>,
 
         #[property(get)]
         uses_meter: Cell<bool>,
@@ -161,6 +182,8 @@ mod imp {
                 search_bar: Default::default(),
                 search_entry: Default::default(),
                 processes_scrolled_window: Default::default(),
+                details_paned: Default::default(),
+                details_pane: Default::default(),
                 options_button: Default::default(),
                 information_button: Default::default(),
                 end_process_button: Default::default(),
@@ -185,6 +208,10 @@ mod imp {
                 tab_id: Cell::new(glib::GString::from(TAB_ID)),
                 popped_over_process: Default::default(),
                 columns: Default::default(),
+                custom_sorter: Default::default(),
+                collapsed_pids: Default::default(),
+                populated: Default::default(),
+                tree_active: Default::default(),
                 graph_locked_max_y: Cell::new(true),
                 primary_ord: Cell::new(PROCESSES_PRIMARY_ORD),
                 secondary_ord: Default::default(),
@@ -255,6 +282,49 @@ mod imp {
                             vec![process_entry.clone()],
                             ProcessAction::CONT,
                         );
+                    }
+                },
+            );
+
+            klass.install_action(
+                "processes.context-kill-tree",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.kill_tree(vec![process_entry]);
+                    }
+                },
+            );
+
+            klass.install_action("processes.kill-tree", None, move |res_processes, _, _| {
+                let selected = res_processes.get_selected_process_entries();
+                if !selected.is_empty() {
+                    res_processes.kill_tree(selected);
+                }
+            });
+
+            klass.install_action(
+                "processes.context-search-online",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.search_online(&process_entry);
+                    }
+                },
+            );
+
+            klass.install_action(
+                "processes.context-check-virustotal",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.check_virustotal(&process_entry);
                     }
                 },
             );
@@ -467,7 +537,16 @@ impl ResProcesses {
             ))),
         );
 
-        let sort_model = gtk::SortListModel::new(Some(filter_model.clone()), column_view.sorter());
+        let custom_sorter = gtk::CustomSorter::new(clone!(
+            #[weak(rename_to = this)]
+            self,
+            #[upgrade_or]
+            gtk::Ordering::Equal,
+            move |a, b| this.compare_entries(a, b)
+        ));
+
+        let sort_model =
+            gtk::SortListModel::new(Some(filter_model.clone()), Some(custom_sorter.clone()));
 
         let selection_model = gtk::MultiSelection::new(Some(sort_model.clone()));
 
@@ -482,12 +561,25 @@ impl ResProcesses {
 
         column_view.add_css_class("resources-columnview");
 
+        *imp.custom_sorter.borrow_mut() = Some(custom_sorter);
         *imp.store.borrow_mut() = store;
         *imp.selection_model.borrow_mut() = selection_model;
         *imp.sort_model.borrow_mut() = sort_model;
         *imp.filter_model.borrow_mut() = filter_model;
 
         imp.processes_scrolled_window.set_child(Some(&*column_view));
+
+        let details_pane =
+            DetailsPane::new(DetailsMode::from_index(SETTINGS.processes_details_mode()));
+        details_pane.widget().set_size_request(-1, 220);
+        details_pane.connect_mode_changed(|mode| {
+            let _ = SETTINGS.set_processes_details_mode(mode.index());
+        });
+        imp.details_paned.set_end_child(Some(details_pane.widget()));
+        details_pane
+            .widget()
+            .set_visible(SETTINGS.processes_show_details());
+        *imp.details_pane.borrow_mut() = Some(details_pane);
     }
 
     fn setup_columns(&self) {
@@ -809,6 +901,17 @@ impl ResProcesses {
                     let bitset = model.selection();
 
                     let one_selected = bitset.size() == 1;
+
+                    if let Some(pane) = &*imp.details_pane.borrow() {
+                        pane.set_pid(if one_selected {
+                            model
+                                .item(bitset.minimum())
+                                .and_downcast::<ProcessEntry>()
+                                .map(|entry| entry.pid())
+                        } else {
+                            None
+                        });
+                    }
                     let multiple_selected = bitset.size() > 0;
 
                     imp.toolbar_view.set_reveal_bottom_bars(multiple_selected);
@@ -833,13 +936,51 @@ impl ResProcesses {
             .set_key_capture_widget(self.parent().as_ref());
 
         imp.search_entry.connect_search_changed(clone!(
-            #[weak]
-            imp,
+            #[weak(rename_to = this)]
+            self,
             move |_| {
+                let imp = this.imp();
                 if let Some(filter) = imp.filter_model.borrow().filter() {
                     filter.changed(FilterChange::Different);
                 }
+                // searching flattens the tree
+                this.relayout_tree();
             }
+        ));
+
+        imp.search_bar.connect_search_mode_enabled_notify(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_| this.relayout_tree()
+        ));
+
+        SETTINGS.connect_processes_show_details(clone!(
+            #[weak]
+            imp,
+            move |show| {
+                if let Some(pane) = &*imp.details_pane.borrow() {
+                    pane.widget().set_visible(show);
+                    pane.refresh();
+                }
+            }
+        ));
+
+        SETTINGS.connect_processes_tree_view(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_| this.relayout_tree()
+        ));
+
+        SETTINGS.connect_processes_row_colors(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_| this.update_row_states()
+        ));
+
+        SETTINGS.connect_processes_highlight_duration(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_| this.update_row_states()
         ));
 
         let event_controller = EventControllerKey::new();
@@ -900,6 +1041,14 @@ impl ResProcesses {
         ));
 
         if let Some(column_view_sorter) = imp.column_view.borrow().sorter() {
+            // the sort model only knows our custom sorter, so it has to be
+            // told whenever the column sorting changes
+            column_view_sorter.connect_changed(clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |_, _| this.relayout_tree()
+            ));
+
             column_view_sorter.connect_changed(clone!(
                 #[weak]
                 imp,
@@ -929,6 +1078,280 @@ impl ResProcesses {
                     }
                 }
             ));
+        }
+    }
+
+    /// Asks for confirmation, then kills the given processes and everything
+    /// that descends from them.
+    pub fn kill_tree(&self, roots: Vec<ProcessEntry>) {
+        let imp = self.imp();
+
+        let entries: Vec<ProcessEntry> = imp
+            .store
+            .borrow()
+            .iter::<ProcessEntry>()
+            .flatten()
+            .filter(|entry| entry.ended_at().is_none())
+            .collect();
+        let nodes: Vec<(i32, i32)> = entries
+            .iter()
+            .map(|entry| (entry.pid(), entry.parent_pid()))
+            .collect();
+        let root_pids: Vec<i32> = roots.iter().map(ProcessEntry::pid).collect();
+
+        let mut to_kill = tree::with_descendants(&nodes, &root_pids);
+        // children first, so that parents can't respawn them while we work
+        to_kill.reverse();
+
+        let victims: Vec<ProcessEntry> = to_kill
+            .iter()
+            .filter_map(|pid| entries.iter().find(|entry| entry.pid() == *pid).cloned())
+            .collect();
+
+        if !victims.is_empty() {
+            self.open_process_action_dialog(victims, ProcessAction::KILL);
+        }
+    }
+
+    pub fn toast(&self, message: &str) {
+        self.imp().toast_overlay.add_toast(adw::Toast::new(message));
+    }
+
+    fn open_uri(&self, uri: String) {
+        let launcher = gtk::UriLauncher::new(&uri);
+        launcher.launch(
+            Some(&MainWindow::default()),
+            gio::Cancellable::NONE,
+            clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |result| {
+                    if let Err(error) = result
+                        && !error.matches(gtk::DialogError::Dismissed)
+                    {
+                        this.toast(&i18n("Could not open the web browser"));
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Opens a web search for the process.
+    pub fn search_online(&self, process: &ProcessEntry) {
+        let query = glib::Uri::escape_string(&process.name(), None, false);
+        self.open_uri(format!("https://duckduckgo.com/?q={query}"));
+    }
+
+    /// Hashes the process' executable and opens its VirusTotal report. Only
+    /// the hash is sent to VirusTotal, not the file.
+    pub fn check_virustotal(&self, process: &ProcessEntry) {
+        let pid = process.pid();
+        glib::spawn_future_local(clone!(
+            #[weak(rename_to = this)]
+            self,
+            async move {
+                let hash = gio::spawn_blocking(move || {
+                    process_data::hash::sha256_file_hex(format!("/proc/{pid}/exe"))
+                })
+                .await;
+                match hash {
+                    Ok(Ok(hash)) => {
+                        this.open_uri(format!("https://www.virustotal.com/gui/file/{hash}"));
+                    }
+                    _ => this.toast(&i18n("Could not read the executable of this process")),
+                }
+            }
+        ));
+    }
+
+    /// Lets the user save the process list as it's currently shown as CSV.
+    pub fn save_snapshot(&self) {
+        let imp = self.imp();
+
+        let header = [
+            "Name",
+            "PID",
+            "Parent PID",
+            "User",
+            "CPU (%)",
+            "Memory (bytes)",
+            "State",
+            "Command line",
+        ];
+        let model = imp.selection_model.borrow().clone();
+        let rows: Vec<Vec<String>> = (0..model.n_items())
+            .filter_map(|position| model.item(position).and_downcast::<ProcessEntry>())
+            .map(|entry| {
+                vec![
+                    entry.name().to_string(),
+                    entry.pid().to_string(),
+                    entry.parent_pid().to_string(),
+                    entry.user().to_string(),
+                    format!("{:.1}", entry.cpu_usage() * 100.0),
+                    entry.memory_usage().to_string(),
+                    entry.state().to_string(),
+                    entry.commandline().to_string(),
+                ]
+            })
+            .collect();
+        let csv = snapshot::to_csv(&header, &rows);
+
+        let dialog = gtk::FileDialog::builder()
+            .title(i18n("Save Process List"))
+            .initial_name("processes.csv")
+            .build();
+        dialog.save(
+            Some(&MainWindow::default()),
+            gio::Cancellable::NONE,
+            clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |result| match result {
+                    Ok(file) => {
+                        let saved = file
+                            .path()
+                            .map(|path| std::fs::write(path, csv.as_bytes()).is_ok())
+                            .unwrap_or(false);
+                        this.toast(&if saved {
+                            i18n("Process list saved")
+                        } else {
+                            i18n("Could not save the process list")
+                        });
+                    }
+                    Err(error) => {
+                        if !error.matches(gtk::DialogError::Dismissed) {
+                            this.toast(&i18n("Could not save the process list"));
+                        }
+                    }
+                }
+            ),
+        );
+    }
+
+    fn compare_entries(&self, a: &Object, b: &Object) -> gtk::Ordering {
+        let imp = self.imp();
+
+        if imp.tree_active.get() {
+            let (Some(a), Some(b)) = (
+                a.downcast_ref::<ProcessEntry>(),
+                b.downcast_ref::<ProcessEntry>(),
+            ) else {
+                return gtk::Ordering::Equal;
+            };
+            gtk::Ordering::from(a.tree_index().cmp(&b.tree_index()))
+        } else {
+            imp.column_view
+                .borrow()
+                .sorter()
+                .map_or(gtk::Ordering::Equal, |sorter| sorter.compare(a, b))
+        }
+    }
+
+    /// Recomputes where each process sits in the tree (or resets everything if
+    /// the tree view is off) and makes the models pick up the change.
+    pub fn relayout_tree(&self) {
+        let imp = self.imp();
+
+        let searching = imp.search_bar.is_search_mode() && !imp.search_entry.text().is_empty();
+        let tree = SETTINGS.processes_tree_view() && !searching;
+        imp.tree_active.set(tree);
+
+        let entries: Vec<ProcessEntry> = imp
+            .store
+            .borrow()
+            .iter::<ProcessEntry>()
+            .flatten()
+            .collect();
+
+        if tree {
+            let nodes: Vec<(i32, i32)> = entries
+                .iter()
+                .map(|entry| (entry.pid(), entry.parent_pid()))
+                .collect();
+            let column_sorter = imp.column_view.borrow().sorter();
+
+            let layout = tree::layout(&nodes, &imp.collapsed_pids.borrow(), |a, b| {
+                column_sorter.as_ref().map_or(Ordering::Equal, |sorter| {
+                    Ordering::from(sorter.compare(&entries[a], &entries[b]))
+                })
+            });
+
+            for (entry, node) in entries.iter().zip(layout) {
+                entry.set_tree_visible(true);
+                entry.set_depth(node.depth);
+                entry.set_has_children(node.has_children);
+                entry.set_hidden(node.hidden);
+                entry.set_tree_index(node.order as u32);
+            }
+        } else {
+            for entry in &entries {
+                entry.set_tree_visible(false);
+                entry.set_depth(0);
+                entry.set_has_children(false);
+                entry.set_hidden(false);
+                entry.set_tree_index(0);
+            }
+        }
+
+        if let Some(filter) = imp.filter_model.borrow().filter() {
+            filter.changed(FilterChange::Different);
+        }
+        if let Some(sorter) = &*imp.custom_sorter.borrow() {
+            sorter.changed(gtk::SorterChange::Different);
+        }
+    }
+
+    fn toggle_expanded(&self, entry: &ProcessEntry) {
+        let imp = self.imp();
+
+        let expanded = !entry.expanded();
+        entry.set_expanded(expanded);
+
+        if expanded {
+            imp.collapsed_pids.borrow_mut().remove(&entry.pid());
+        } else {
+            imp.collapsed_pids.borrow_mut().insert(entry.pid());
+        }
+
+        self.relayout_tree();
+    }
+
+    /// Recomputes the highlighting of every row.
+    fn update_row_states(&self) {
+        let imp = self.imp();
+
+        let now = Instant::now();
+        let highlight = Duration::from_secs(SETTINGS.processes_highlight_duration().max(0) as u64);
+        let colors = SETTINGS.processes_row_colors();
+        let own_uid = unsafe { libc::getuid() };
+
+        let entries: Vec<ProcessEntry> = imp
+            .store
+            .borrow()
+            .iter::<ProcessEntry>()
+            .flatten()
+            .collect();
+
+        for entry in entries {
+            let state = if colors {
+                row_state::classify(
+                    &RowInfo {
+                        uid: entry.uid(),
+                        own_uid,
+                        state: entry.state(),
+                        sandboxed: entry.is_sandboxed(),
+                        ended_for: entry.ended_at().map(|at| now.duration_since(at)),
+                        seen_for: entry.first_seen().map(|at| now.duration_since(at)),
+                    },
+                    highlight,
+                )
+            } else {
+                RowState::None
+            };
+
+            if entry.row_state() != state.name() {
+                entry.set_row_state(state.name());
+            }
         }
     }
 
@@ -1002,10 +1425,12 @@ impl ResProcesses {
         let lowered_search_entry_text = imp.search_entry.text().to_lowercase();
         let search_strings: Vec<&str> = lowered_search_entry_text.split('|').collect();
 
-        !imp.search_bar.is_search_mode()
-            || search_strings.iter().any(|search_string| {
-                item_name.contains(search_string) || item_commandline.contains(search_string)
-            })
+        // children of collapsed processes are hidden in tree mode
+        !item.hidden()
+            && (!imp.search_bar.is_search_mode()
+                || search_strings.iter().any(|search_string| {
+                    item_name.contains(search_string) || item_commandline.contains(search_string)
+                }))
     }
 
     pub fn get_selected_process_entries(&self) -> Vec<ProcessEntry> {
@@ -1051,7 +1476,11 @@ impl ResProcesses {
             imp.options_dialog_closed.set(false);
         }
 
-        let store = imp.store.borrow_mut();
+        let store = imp.store.borrow().clone();
+        let now = Instant::now();
+        let highlight = Duration::from_secs(SETTINGS.processes_highlight_duration().max(0) as u64);
+        // ended processes are kept around (and highlighted) for a moment
+        let keep_ended = SETTINGS.processes_row_colors() && !highlight.is_zero();
         let mut info_dialog_opt = imp.open_info_dialog.borrow_mut();
         let mut options_dialog_opt = imp.open_options_dialog.borrow_mut();
 
@@ -1061,15 +1490,29 @@ impl ResProcesses {
         // change process entries of processes that have existed before
         store.iter::<ProcessEntry>().flatten().for_each(|object| {
             let item_pid = object.pid();
-            if let Some(process) = apps_context.get_process(item_pid) {
-                object.update(process);
-                if let Some((dialog_pid, dialog)) = &*info_dialog_opt
-                    && *dialog_pid == item_pid
-                {
-                    dialog.update(&object);
+
+            let gone = match (apps_context.get_process(item_pid), object.ended_at()) {
+                (Some(process), None) => {
+                    object.update(process);
+                    if let Some((dialog_pid, dialog)) = &*info_dialog_opt
+                        && *dialog_pid == item_pid
+                    {
+                        dialog.update(&object);
+                    }
+                    already_existing_pids.insert(item_pid);
+                    false
                 }
-                already_existing_pids.insert(item_pid);
-            } else {
+                // the pid has been reused by a new process, the old row is stale
+                (Some(_), Some(_)) => true,
+                (None, None) if keep_ended => {
+                    object.mark_ended(now);
+                    false
+                }
+                (None, None) => true,
+                (None, Some(ended_at)) => !keep_ended || now.duration_since(ended_at) >= highlight,
+            };
+
+            if gone {
                 // filter out processes that have existed before but don't anymore
                 if let Some((dialog_pid, dialog)) = &*info_dialog_opt
                     && *dialog_pid == item_pid
@@ -1085,6 +1528,7 @@ impl ResProcesses {
                 }
                 *imp.popped_over_process.borrow_mut() = None;
                 imp.popover_menu.set_visible(false);
+                imp.collapsed_pids.borrow_mut().remove(&item_pid);
                 pids_to_remove.insert(item_pid);
             }
         });
@@ -1094,22 +1538,34 @@ impl ResProcesses {
 
         // remove recently deceased processes
         store.retain(|object| {
-            !pids_to_remove.contains(&object.clone().downcast::<ProcessEntry>().unwrap().pid())
+            !pids_to_remove.contains(&object.downcast_ref::<ProcessEntry>().unwrap().pid())
         });
 
         // add the newly started process to the store
+        let populated = imp.populated.replace(true);
         let items: Vec<ProcessEntry> = apps_context
             .processes_iter()
-            .filter(|process| {
-                !already_existing_pids.contains(&process.data.pid)
-                    && !pids_to_remove.contains(&process.data.pid)
+            .filter(|process| !already_existing_pids.contains(&process.data.pid))
+            .map(|process| {
+                let entry = ProcessEntry::new(process);
+                if populated {
+                    entry.set_first_seen(Some(now));
+                }
+                entry
             })
-            .map(ProcessEntry::new)
             .collect();
         store.extend_from_slice(&items);
 
+        self.update_row_states();
+
         if let Some(sorter) = imp.column_view.borrow().sorter() {
             sorter.changed(gtk::SorterChange::Different);
+        }
+
+        if SETTINGS.processes_show_details()
+            && let Some(pane) = &*imp.details_pane.borrow()
+        {
+            pane.refresh();
         }
 
         if imp.selection_model.borrow().selection().size() == 0 {
@@ -1121,7 +1577,12 @@ impl ResProcesses {
 
         self.set_tab_usage_labels(UsageLabels::single_without_icon(i18n_f(
             "Running Processes: {}",
-            &[&(store.n_items()).to_string()],
+            &[&store
+                .iter::<ProcessEntry>()
+                .flatten()
+                .filter(|entry| entry.ended_at().is_none())
+                .count()
+                .to_string()],
         )));
     }
 
@@ -1249,6 +1710,38 @@ impl ResProcesses {
                 item.property_expression("item")
                     .chain_property::<ProcessEntry>("symbolic")
                     .bind(&row, "symbolic", Widget::NONE);
+
+                item.property_expression("item")
+                    .chain_property::<ProcessEntry>("depth")
+                    .bind(&row, "depth", Widget::NONE);
+
+                item.property_expression("item")
+                    .chain_property::<ProcessEntry>("tree-visible")
+                    .bind(&row, "tree-visible", Widget::NONE);
+
+                item.property_expression("item")
+                    .chain_property::<ProcessEntry>("has-children")
+                    .bind(&row, "has-children", Widget::NONE);
+
+                item.property_expression("item")
+                    .chain_property::<ProcessEntry>("expanded")
+                    .bind(&row, "expanded", Widget::NONE);
+
+                item.property_expression("item")
+                    .chain_property::<ProcessEntry>("row-state")
+                    .bind(&row, "row-state", Widget::NONE);
+
+                row.connect_expander_clicked(clone!(
+                    #[weak]
+                    item,
+                    #[weak(rename_to = page)]
+                    this,
+                    move |_| {
+                        if let Some(entry) = item.item().and_downcast::<ProcessEntry>() {
+                            page.toggle_expanded(&entry);
+                        }
+                    }
+                ));
 
                 this.add_gestures(item);
             }

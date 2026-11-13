@@ -28,6 +28,24 @@
             <property name="action-name">app.toggle-sidebar</property>
           </object>
         </child>
+        <child>
+          <object class="AdwShortcutsItem">
+            <property name="title" translatable="yes" context="shortcut window">Pause or Resume Updates</property>
+            <property name="action-name">app.toggle-pause</property>
+          </object>
+        </child>
+        <child>
+          <object class="AdwShortcutsItem">
+            <property name="title" translatable="yes" context="shortcut window">Find Open File or Library</property>
+            <property name="action-name">app.find-handle</property>
+          </object>
+        </child>
+        <child>
+          <object class="AdwShortcutsItem">
+            <property name="title" translatable="yes" context="shortcut window">Save Process List</property>
+            <property name="action-name">app.save-process-list</property>
+          </object>
+        </child>
       </object>
     </child>
     <child>

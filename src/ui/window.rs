@@ -27,6 +27,7 @@ use crate::ui::pages::drive::ResDrive;
 use crate::ui::pages::processes::ResProcesses;
 use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
 use crate::utils::settings::SETTINGS;
+use crate::utils::units::{convert_fraction, convert_storage};
 
 use super::pages::applications;
 use super::pages::gpu::ResGPU;
@@ -92,6 +93,10 @@ mod imp {
         #[template_child]
         pub processes_search_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
+        pub processes_tree_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub processes_details_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
         pub memory: TemplateChild<ResMemory>,
         #[template_child]
         pub memory_page: TemplateChild<gtk::StackPage>,
@@ -109,6 +114,8 @@ mod imp {
         pub apps_context: RefCell<AppsContext>,
 
         pub pause_updates: Cell<bool>,
+        /// Updates paused by the user (as opposed to by holding Ctrl)
+        pub user_paused: Cell<bool>,
 
         pub sender: Sender<Action>,
         pub receiver: RefCell<Option<Receiver<Action>>>,
@@ -132,12 +139,15 @@ mod imp {
                 processes: TemplateChild::default(),
                 processes_page: TemplateChild::default(),
                 processes_search_button: TemplateChild::default(),
+                processes_tree_button: TemplateChild::default(),
+                processes_details_button: TemplateChild::default(),
                 cpu: TemplateChild::default(),
                 cpu_page: TemplateChild::default(),
                 memory: TemplateChild::default(),
                 memory_page: TemplateChild::default(),
                 apps_context: Default::default(),
                 pause_updates: Default::default(),
+                user_paused: Default::default(),
                 sender,
                 receiver,
                 processor_window_title: TemplateChild::default(),
@@ -334,6 +344,22 @@ impl MainWindow {
             .bidirectional()
             .build();
 
+        SETTINGS
+            .bind(
+                "processes-tree-view",
+                &imp.processes_tree_button.get(),
+                "active",
+            )
+            .build();
+
+        SETTINGS
+            .bind(
+                "processes-show-details",
+                &imp.processes_details_button.get(),
+                "active",
+            )
+            .build();
+
         imp.content_stack.connect_visible_child_notify(clone!(
             #[weak]
             imp,
@@ -452,6 +478,24 @@ impl MainWindow {
                 imp.processes.open_options_dialog(&selected[0]);
             }
         }
+    }
+
+    pub fn set_user_paused(&self, paused: bool) {
+        self.imp().user_paused.set(paused);
+        let toast = if paused {
+            i18n("Updates paused")
+        } else {
+            i18n("Updates resumed")
+        };
+        self.imp().processes.toast(&toast);
+    }
+
+    pub fn shortcut_save_process_list(&self) {
+        self.imp().processes.save_snapshot();
+    }
+
+    pub fn shortcut_find_handle(&self) {
+        crate::ui::dialogs::find_dialog::present(self);
     }
 
     pub fn toggle_sidebar(&self) {
@@ -654,7 +698,7 @@ impl MainWindow {
         apps_context.refresh(process_data);
 
         // if CTRL is held, don't update apps and processes like Windows Task Manager
-        if !imp.pause_updates.get() {
+        if !imp.pause_updates.get() && !imp.user_paused.get() {
             trace!("Skipping visual apps and processes updates");
             imp.apps.refresh_apps_list(&apps_context);
             imp.processes.refresh_processes_list(&apps_context);
@@ -741,12 +785,43 @@ impl MainWindow {
             page.refresh_page(&npu_data);
         }
 
+        // remember which process uses the most CPU and memory right now, so the
+        // graphs can show it in their tooltips
+        let top_cpu = apps_context
+            .processes_iter()
+            .filter(|process| process.cpu_time_ratio() > 0.0)
+            .max_by(|a, b| a.cpu_time_ratio().total_cmp(&b.cpu_time_ratio()))
+            .map(|process| {
+                i18n_f(
+                    "Top: {} ({}) — {}",
+                    &[
+                        &process.display_name,
+                        &process.data.pid.to_string(),
+                        &convert_fraction(f64::from(process.cpu_time_ratio()), false),
+                    ],
+                )
+            });
+        let top_memory = apps_context
+            .processes_iter()
+            .max_by_key(|process| process.mem_usage())
+            .map(|process| {
+                i18n_f(
+                    "Top: {} ({}) — {}",
+                    &[
+                        &process.display_name,
+                        &process.data.pid.to_string(),
+                        &convert_storage(process.mem_usage() as f64, false),
+                    ],
+                )
+            });
+
         std::mem::drop(apps_context);
 
         /*
          * Cpu
          */
         if let Some(cpu_data) = cpu_data {
+            imp.cpu.imp().total_cpu.graph().set_pending_label(top_cpu);
             imp.cpu.refresh_page(&cpu_data);
         }
 
@@ -755,6 +830,11 @@ impl MainWindow {
          */
         if let Some(mem_data_result) = mem_data {
             if let Ok(mem_data) = mem_data_result {
+                imp.memory
+                    .imp()
+                    .memory
+                    .graph()
+                    .set_pending_label(top_memory);
                 imp.memory.refresh_page(mem_data);
             } else if let Err(error) = mem_data_result {
                 warn!("Unable to update memory data, reason: {error}");

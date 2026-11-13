@@ -46,3 +46,35 @@ flowbox.unselectable-flowbox flowboxchild:selected {
     background: none;
     box-shadow: none;
 }
+/* Process Explorer-style row highlighting in the processes view */
+.resources-columnview row.proc-new:not(:selected) {
+  background-color: alpha(@green_4, 0.35);
+}
+
+.resources-columnview row.proc-ended:not(:selected) {
+  background-color: alpha(@red_4, 0.35);
+}
+
+.resources-columnview row.proc-stopped:not(:selected) {
+  background-color: alpha(currentColor, 0.14);
+  font-style: italic;
+}
+
+.resources-columnview row.proc-sandboxed:not(:selected) {
+  background-color: alpha(@orange_3, 0.18);
+}
+
+.resources-columnview row.proc-own:not(:selected) {
+  background-color: alpha(@blue_3, 0.14);
+}
+
+.resources-columnview row.proc-service:not(:selected) {
+  background-color: alpha(@purple_3, 0.16);
+}
+
+.process-expander {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+}

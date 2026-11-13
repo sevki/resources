@@ -6,6 +6,7 @@ use ini::Ini;
 use log::{debug, trace};
 use process_data::unix_as_millis;
 
+pub mod column_sets;
 pub mod i18n;
 pub mod os;
 pub mod settings;

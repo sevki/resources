@@ -3,6 +3,20 @@
   <menu id="primary_menu">
     <section>
       <item>
+        <attribute name="label" translatable="yes">_Pause Updates</attribute>
+        <attribute name="action">app.toggle-pause</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Find Open File or Library…</attribute>
+        <attribute name="action">app.find-handle</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_Save Process List…</attribute>
+        <attribute name="action">app.save-process-list</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
         <attribute name="label" translatable="yes">_Preferences</attribute>
         <attribute name="action">app.settings</attribute>
       </item>
@@ -119,6 +133,24 @@
                                 <property name="icon-name">sidebar-show-symbolic</property>
                                 <property name="visible" bind-source="split_view" bind-property="collapsed" bind-flags="sync-create"/>
                                 <property name="active" bind-source="split_view" bind-property="show-sidebar" bind-flags="sync-create|bidirectional"/>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="processes_details_button">
+                                <property name="icon-name">view-dual-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Show Process Details</property>
+                                <accessibility>
+                                  <property name="label" translatable="yes">Show process details</property>
+                                </accessibility>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkToggleButton" id="processes_tree_button">
+                                <property name="icon-name">process-tree-symbolic</property>
+                                <property name="tooltip-text" translatable="yes">Show Process Tree</property>
+                                <accessibility>
+                                  <property name="label" translatable="yes">Show process tree</property>
+                                </accessibility>
                               </object>
                             </child>
                             <child>
