@@ -11,12 +11,13 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- libraries
 
 /// A file mapped into a process' address space (shared library, executable,
 /// memory-mapped data file…), with all of its mappings merged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MappedFile {
     pub path: String,
     /// total size of all mappings of the file in bytes
@@ -76,7 +77,7 @@ pub fn parse_maps(maps: &str) -> Vec<MappedFile> {
 }
 
 /// One line of `/proc/<pid>/maps`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mapping {
     pub start: u64,
     pub end: u64,
@@ -139,7 +140,7 @@ pub fn read_mapped_files(pid: libc::pid_t) -> Result<Vec<MappedFile>> {
 
 // -------------------------------------------------------------- open files
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FdKind {
     File,
     Socket,
@@ -150,7 +151,7 @@ pub enum FdKind {
 }
 
 /// Open file descriptor of a process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenFile {
     pub fd: u32,
     pub kind: FdKind,
@@ -205,12 +206,12 @@ pub fn read_open_files(pid: libc::pid_t) -> Result<Vec<OpenFile>> {
 
 // ----------------------------------------------------------------- sockets
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SocketEntry {
-    pub protocol: &'static str,
+    pub protocol: String,
     pub local: String,
     pub remote: String,
-    pub state: &'static str,
+    pub state: String,
     pub inode: u64,
 }
 
@@ -266,7 +267,7 @@ pub fn tcp_state_name(code: &str) -> &'static str {
 
 /// Parses one of `/proc/net/{tcp,tcp6,udp,udp6}`.
 #[must_use]
-pub fn parse_net(content: &str, protocol: &'static str, ipv6: bool) -> Vec<SocketEntry> {
+pub fn parse_net(content: &str, protocol: &str, ipv6: bool) -> Vec<SocketEntry> {
     let is_tcp = protocol.starts_with("TCP");
 
     content
@@ -280,7 +281,7 @@ pub fn parse_net(content: &str, protocol: &'static str, ipv6: bool) -> Vec<Socke
             let state_code = fields.get(3)?;
             let inode: u64 = fields.get(9)?.parse().ok()?;
             Some(SocketEntry {
-                protocol,
+                protocol: protocol.to_string(),
                 local,
                 remote,
                 state: if is_tcp {
@@ -290,7 +291,8 @@ pub fn parse_net(content: &str, protocol: &'static str, ipv6: bool) -> Vec<Socke
                     "-"
                 } else {
                     "ESTABLISHED"
-                },
+                }
+                .to_string(),
                 inode,
             })
         })
@@ -326,7 +328,7 @@ pub fn read_sockets(pid: libc::pid_t) -> Result<Vec<SocketEntry>> {
 
 // ----------------------------------------------------------------- threads
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadEntry {
     pub tid: libc::pid_t,
     pub name: String,
@@ -454,7 +456,7 @@ pub fn decode_capabilities(hex: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityInfo {
     /// real, effective, saved and filesystem user IDs
     pub uids: Vec<u32>,
@@ -464,7 +466,7 @@ pub struct SecurityInfo {
     pub capabilities_permitted: Vec<String>,
     pub no_new_privs: Option<bool>,
     /// `disabled`, `strict` or `filter`
-    pub seccomp: Option<&'static str>,
+    pub seccomp: Option<String>,
     /// SELinux / AppArmor context from `/proc/<pid>/attr/current`
     pub lsm_context: Option<String>,
 }
@@ -494,9 +496,9 @@ pub fn parse_security(status: &str) -> SecurityInfo {
             "NoNewPrivs" => info.no_new_privs = Some(value == "1"),
             "Seccomp" => {
                 info.seccomp = match value {
-                    "0" => Some("disabled"),
-                    "1" => Some("strict"),
-                    "2" => Some("filter"),
+                    "0" => Some("disabled".to_string()),
+                    "1" => Some("strict".to_string()),
+                    "2" => Some("filter".to_string()),
                     _ => None,
                 }
             }
@@ -518,17 +520,38 @@ pub fn read_security(pid: libc::pid_t) -> Result<SecurityInfo> {
     Ok(info)
 }
 
+// -------------------------------------------------------------- executable
+
+/// The executable of a process and its hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutableInfo {
+    pub path: String,
+    /// SHA-256 as lowercase hex
+    pub sha256: String,
+}
+
+pub fn read_executable_info(pid: libc::pid_t) -> Result<ExecutableInfo> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .with_context(|| format!("can't read the executable of {pid}"))?;
+    let sha256 = crate::hash::sha256_file_hex(format!("/proc/{pid}/exe"))
+        .with_context(|| format!("can't hash the executable of {pid}"))?;
+    Ok(ExecutableInfo {
+        path: path.to_string_lossy().to_string(),
+        sha256,
+    })
+}
+
 // -------------------------------------------------------------------- find
 
 /// A file, library or socket of some process matching a search.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindMatch {
     pub pid: libc::pid_t,
     pub kind: FindKind,
     pub target: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindKind {
     Library,
     File,
@@ -757,7 +780,7 @@ ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0 [vsyscall]
         assert_eq!(info.groups, vec![100, 27]);
         assert_eq!(info.capabilities_effective, vec!["CAP_NET_BIND_SERVICE"]);
         assert_eq!(info.no_new_privs, Some(true));
-        assert_eq!(info.seccomp, Some("filter"));
+        assert_eq!(info.seccomp.as_deref(), Some("filter"));
     }
 
     #[test]

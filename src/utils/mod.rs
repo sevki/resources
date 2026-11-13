@@ -7,6 +7,7 @@ use log::{debug, trace};
 use process_data::unix_as_millis;
 
 pub mod column_sets;
+pub mod host_proc;
 pub mod i18n;
 pub mod os;
 pub mod secrets;
