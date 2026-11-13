@@ -54,6 +54,9 @@ export GSETTINGS_BACKEND=keyfile
 export GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none LC_ALL=C.UTF-8 LANGUAGE=C
 export DISPLAY="$display"
 unset GTK_THEME
+# a key from the environment, so that Preferences doesn't depend on whether a
+# keyring is available (and how quickly it says no)
+export RESOURCES_VIRUSTOTAL_API_KEY=screenshot-test-key
 
 mkdir -p "$XDG_CONFIG_HOME/gtk-4.0" "$XDG_CONFIG_HOME/glib-2.0/settings"
 cat > "$XDG_CONFIG_HOME/gtk-4.0/settings.ini" <<INI
