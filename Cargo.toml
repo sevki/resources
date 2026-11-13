@@ -2,7 +2,7 @@
 name = "resources"
 version = "51.0.0"
 edition = "2024"
-rust-version = "1.93.0"
+rust-version = "1.95.0"
 homepage = "https://apps.gnome.org/app/org.gnome.Resources/"
 license = "GPL-3.0-or-later"
 
@@ -51,6 +51,11 @@ soup3 = "0.9.0"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 sysconf = "0.3.4"
+yara-x = "1.23.0"
+# yara-x 1.23 asks for rsa 0.10.0-rc.19 but doesn't enable the `pkcs1v15`
+# feature that rsa 0.10.0 made opt-in, so it only compiles if somebody else
+# turns it on. Remove once yara-x does it itself.
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

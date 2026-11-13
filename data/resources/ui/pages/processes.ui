@@ -76,6 +76,10 @@
         <attribute name="label" translatable="yes">Check on VirusTotal</attribute>
         <attribute name="action">processes.context-check-virustotal</attribute>
       </item>
+      <item>
+        <attribute name="label" translatable="yes">Scan with YARA</attribute>
+        <attribute name="action">processes.context-yara-scan</attribute>
+      </item>
     </section>
     <section>
       <item>

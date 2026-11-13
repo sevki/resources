@@ -330,6 +330,18 @@ mod imp {
             );
 
             klass.install_action(
+                "processes.context-yara-scan",
+                None,
+                move |res_processes, _, _| {
+                    if let Some(process_entry) =
+                        res_processes.imp().popped_over_process.borrow().clone()
+                    {
+                        res_processes.scan_with_yara(&process_entry);
+                    }
+                },
+            );
+
+            klass.install_action(
                 "processes.context-information",
                 None,
                 move |res_processes, _, _| {
@@ -1140,6 +1152,19 @@ impl ResProcesses {
     pub fn search_online(&self, process: &ProcessEntry) {
         let query = glib::Uri::escape_string(&process.name(), None, false);
         self.open_uri(format!("https://duckduckgo.com/?q={query}"));
+    }
+
+    /// Opens the details pane in YARA mode for the process and scans it.
+    pub fn scan_with_yara(&self, process: &ProcessEntry) {
+        // makes the pane visible through the setting
+        let _ = SETTINGS.set_processes_show_details(true);
+
+        if let Some(pane) = &*self.imp().details_pane.borrow() {
+            pane.widget().set_visible(true);
+            pane.show_mode(DetailsMode::Yara);
+            pane.set_pid(Some(process.pid()));
+            pane.scan();
+        }
     }
 
     /// Hashes the process' executable and opens its VirusTotal report. Only
