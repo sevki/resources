@@ -10,14 +10,14 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gio, pango};
-use process_data::details::{self, FdKind};
+use process_data::details::FdKind;
 
-use crate::utils::TICK_RATE;
 use crate::utils::i18n::{i18n, i18n_f, ni18n_f};
 use crate::utils::secrets;
 use crate::utils::units::{convert_storage, format_time};
 use crate::utils::virustotal::{self, Lookup};
 use crate::utils::yara::{self, ScanReport};
+use crate::utils::{TICK_RATE, host_proc};
 
 type ModeCallback = Box<dyn Fn(DetailsMode)>;
 type VirusTotalCallback = Box<dyn Fn(libc::pid_t, String)>;
@@ -105,7 +105,7 @@ impl DetailsMode {
     /// Fetches the rows of this mode for a process, one `Vec<String>` per row.
     pub fn rows(self, pid: libc::pid_t) -> anyhow::Result<Vec<Vec<String>>> {
         Ok(match self {
-            Self::Libraries => details::read_mapped_files(pid)?
+            Self::Libraries => host_proc::mapped_files(pid)?
                 .into_iter()
                 .map(|file| {
                     vec![
@@ -115,7 +115,7 @@ impl DetailsMode {
                     ]
                 })
                 .collect(),
-            Self::Files => details::read_open_files(pid)?
+            Self::Files => host_proc::open_files(pid)?
                 .into_iter()
                 .map(|file| {
                     let kind = match file.kind {
@@ -128,7 +128,7 @@ impl DetailsMode {
                     vec![file.fd.to_string(), kind, file.target]
                 })
                 .collect(),
-            Self::Network => details::read_sockets(pid)?
+            Self::Network => host_proc::sockets(pid)?
                 .into_iter()
                 .map(|socket| {
                     vec![
@@ -139,7 +139,7 @@ impl DetailsMode {
                     ]
                 })
                 .collect(),
-            Self::Threads => details::read_threads(pid)?
+            Self::Threads => host_proc::threads(pid)?
                 .into_iter()
                 .map(|thread| {
                     vec![
@@ -150,14 +150,14 @@ impl DetailsMode {
                     ]
                 })
                 .collect(),
-            Self::Environment => details::read_environment(pid)?
+            Self::Environment => host_proc::environment(pid)?
                 .into_iter()
                 .map(|(name, value)| vec![name, value])
                 .collect(),
             // scanning takes long, so it's done on request, see `DetailsPane::scan`
             Self::Yara | Self::VirusTotal => Vec::new(),
             Self::Security => {
-                let info = details::read_security(pid)?;
+                let info = host_proc::security(pid)?;
                 let join = |items: &[String]| {
                     if items.is_empty() {
                         i18n("None")
@@ -198,10 +198,7 @@ impl DetailsMode {
                         join(&info.capabilities_permitted),
                     ],
                     vec![i18n("No New Privileges"), yes_no(info.no_new_privs)],
-                    vec![
-                        i18n("Seccomp"),
-                        info.seccomp.map_or_else(|| i18n("N/A"), str::to_string),
-                    ],
+                    vec![i18n("Seccomp"), info.seccomp.unwrap_or_else(|| i18n("N/A"))],
                     vec![
                         i18n("Security Label (SELinux/AppArmor)"),
                         info.lsm_context.unwrap_or_else(|| i18n("N/A")),
@@ -209,6 +206,20 @@ impl DetailsMode {
                 ]
             }
         })
+    }
+}
+
+/// Rows and status text for a mode that reads process data.
+fn plain_rows(mode: DetailsMode, rows: anyhow::Result<Vec<Vec<String>>>) -> (Vec<String>, String) {
+    match rows {
+        Ok(rows) => {
+            let title = format!("{} — {}", mode.label(), rows.len());
+            (rows.into_iter().map(|row| row.join("\t")).collect(), title)
+        }
+        Err(_) => (
+            Vec::new(),
+            i18n("Not available (the process has ended or access is denied)"),
+        ),
     }
 }
 
@@ -229,19 +240,14 @@ async fn virustotal_outcome(pid: libc::pid_t) -> YaraOutcome {
         }
     };
 
-    let executable = gio::spawn_blocking(move || {
-        let path = std::fs::read_link(format!("/proc/{pid}/exe"))?;
-        let hash = process_data::hash::sha256_file_hex(format!("/proc/{pid}/exe"))?;
-        Ok::<_, std::io::Error>((path, hash))
-    })
-    .await;
-    let Ok(Ok((path, hash))) = executable else {
+    let executable = gio::spawn_blocking(move || host_proc::executable(pid)).await;
+    let Ok(Ok(process_data::details::ExecutableInfo { path, sha256: hash })) = executable else {
         return YaraOutcome::message(i18n("Could not read the executable of this process"));
     };
 
     let property = |name: String, value: String| format!("{}\t{}", clean(&name), clean(&value));
     let mut rows = vec![
-        property(i18n("File"), path.to_string_lossy().to_string()),
+        property(i18n("File"), path),
         property(i18n("SHA-256"), hash.clone()),
     ];
 
@@ -305,6 +311,8 @@ struct Inner {
     rules_button: gtk::Button,
     memory_button: gtk::Button,
     scanning: Cell<bool>,
+    /// a helper query for the current mode is running
+    fetching: Cell<bool>,
     /// results of the last YARA scan of each process
     yara_results: RefCell<HashMap<libc::pid_t, YaraOutcome>>,
     /// results of the last VirusTotal check of each process
@@ -514,6 +522,7 @@ impl DetailsPane {
             rules_button: gtk::Button::from_icon_name("folder-open-symbolic"),
             memory_button: gtk::Button::with_label(&i18n("Scan Memory")),
             scanning: Cell::new(false),
+            fetching: Cell::new(false),
             yara_results: RefCell::new(HashMap::new()),
             virustotal_results: RefCell::new(HashMap::new()),
             on_virustotal_result: RefCell::new(None),
@@ -806,6 +815,15 @@ impl DetailsPane {
         let inner = &self.inner;
         let mode = inner.mode.get();
 
+        // asking the helper takes a moment, don't block the interface for it
+        if let Some(pid) = inner.pid.get()
+            && !mode.is_on_demand()
+            && host_proc::via_helper()
+        {
+            self.refresh_from_helper(pid, mode);
+            return;
+        }
+
         let mut tooltip = String::new();
         let (rows, title): (Vec<String>, String) = match inner.pid.get() {
             None => (
@@ -837,17 +855,41 @@ impl DetailsPane {
                     ),
                 }
             }
-            Some(pid) => match mode.rows(pid) {
-                Ok(rows) => {
-                    let title = format!("{} — {}", mode.label(), rows.len());
-                    (rows.into_iter().map(|row| row.join("\t")).collect(), title)
-                }
-                Err(_) => (
-                    Vec::new(),
-                    i18n("Not available (the process has ended or access is denied)"),
-                ),
-            },
+            Some(pid) => plain_rows(mode, mode.rows(pid)),
         };
+
+        self.show(rows, title, tooltip);
+    }
+
+    /// Like `refresh` for the modes that read process data, but asks the
+    /// helper on a worker thread.
+    fn refresh_from_helper(&self, pid: libc::pid_t, mode: DetailsMode) {
+        if self.inner.fetching.replace(true) {
+            return;
+        }
+
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(move || mode.rows(pid)).await;
+            this.inner.fetching.set(false);
+
+            // the selection or the mode may have changed in the meantime
+            if this.inner.pid.get() != Some(pid) || this.inner.mode.get() != mode {
+                this.refresh();
+                return;
+            }
+
+            let (rows, title) = match result {
+                Ok(result) => plain_rows(mode, result),
+                Err(_) => plain_rows(mode, Err(anyhow::anyhow!("worker thread failed"))),
+            };
+            this.show(rows, title, String::new());
+        });
+    }
+
+    /// Puts the rows and the status text on screen.
+    fn show(&self, rows: Vec<String>, title: String, tooltip: String) {
+        let inner = &self.inner;
 
         inner.title.set_text(&title);
         inner.title.set_tooltip_text(

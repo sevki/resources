@@ -9,7 +9,9 @@ use std::{
     time::Instant,
 };
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use process_data::details;
+use serde::Serialize;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -25,6 +27,70 @@ struct Args {
     /// How/If to read PSS memory statistics
     #[arg(value_enum, short, long, default_value_t = PssMode::Disabled)]
     pss: PssMode,
+
+    /// Answer a single question about one process (or, for `find`, about all
+    /// of them) as JSON, then exit. Used by Resources to look at processes
+    /// that its sandbox can't see.
+    #[arg(long, value_enum)]
+    query: Option<Query>,
+
+    /// Process the query is about
+    #[arg(long)]
+    pid: Option<libc::pid_t>,
+
+    /// Text to search for with `--query find`
+    #[arg(long)]
+    needle: Option<String>,
+}
+
+/// What can be asked with `--query`, see `process_data::details`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Query {
+    /// Mapped files (libraries)
+    Libraries,
+    /// All memory mappings
+    Mappings,
+    /// Open file descriptors
+    Files,
+    /// TCP and UDP sockets
+    Sockets,
+    Threads,
+    Environment,
+    Security,
+    /// Executable path and SHA-256
+    Executable,
+    /// Open files and libraries of all processes matching `--needle`
+    Find,
+}
+
+/// Serializes the answer as `{"Ok": …}` or `{"Err": "message"}`.
+fn reply<T: Serialize>(result: Result<T>) -> Result<()> {
+    let result: std::result::Result<T, String> = result.map_err(|error| format!("{error:#}"));
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &result)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn answer(query: Query, pid: Option<libc::pid_t>, needle: Option<String>) -> Result<()> {
+    if let Query::Find = query {
+        return reply(Ok(details::find_all(&needle.unwrap_or_default())));
+    }
+
+    let Some(pid) = pid else {
+        return reply::<()>(Err(anyhow::anyhow!("--pid is required for this query")));
+    };
+    match query {
+        Query::Libraries => reply(details::read_mapped_files(pid)),
+        Query::Mappings => reply(details::read_mappings(pid)),
+        Query::Files => reply(details::read_open_files(pid)),
+        Query::Sockets => reply(details::read_sockets(pid)),
+        Query::Threads => reply(details::read_threads(pid)),
+        Query::Environment => reply(details::read_environment(pid)),
+        Query::Security => reply(details::read_security(pid)),
+        Query::Executable => reply(details::read_executable_info(pid)),
+        Query::Find => unreachable!("handled above"),
+    }
 }
 
 fn main() -> Result<()> {
@@ -35,6 +101,10 @@ fn main() -> Result<()> {
 
     debug!("Parsing arguments…");
     let args = Args::parse();
+
+    if let Some(query) = args.query {
+        return answer(query, args.pid, args.needle);
+    }
 
     let mut non_gpu_fdinfos = HashSet::new();
     let mut non_npu_fdinfos = HashSet::new();

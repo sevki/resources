@@ -5,8 +5,9 @@
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib::{self, clone};
-use process_data::details::{self, FindKind, FindMatch};
+use process_data::details::{FindKind, FindMatch};
 
+use crate::utils::host_proc;
 use crate::utils::i18n::{i18n, i18n_f};
 
 /// Upper bound of shown results so that searching for e.g. "/" stays responsive
@@ -98,7 +99,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
                 status,
                 async move {
                     let result = gio::spawn_blocking(move || {
-                        let matches = details::find_all(&needle);
+                        let matches = host_proc::find_all(&needle);
                         let total = matches.len();
                         let shown: Vec<(FindMatch, String)> = matches
                             .into_iter()

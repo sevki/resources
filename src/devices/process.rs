@@ -31,7 +31,23 @@ use crate::{
     },
 };
 
-static COMPANION_PROCESS: LazyLock<Mutex<(ChildStdin, ChildStdout)>> = LazyLock::new(|| {
+/// Environment variable that replaces the path of the `resources-processes`
+/// binary, for testing.
+pub const HELPER_PATH_ENV: &str = "RESOURCES_PROCESSES_BIN";
+
+/// Builds the command that runs `resources-processes` with `args`: on the
+/// host via `flatpak-spawn` inside Flatpak (which can see all processes),
+/// directly otherwise. If [`HELPER_PATH_ENV`] is set, that binary is always
+/// run directly (also inside Flatpak, e.g. when the tests run in the build
+/// sandbox, where there is no host to spawn on).
+pub fn helper_command(args: &[&str]) -> Command {
+    if let Ok(path) = std::env::var(HELPER_PATH_ENV) {
+        debug!("Running {path} directly ({})", args.join(" "));
+        let mut command = Command::new(path);
+        command.args(args);
+        return command;
+    }
+
     let proxy_path = if *IS_FLATPAK {
         format!(
             "{}/libexec/resources/resources-processes",
@@ -41,15 +57,7 @@ static COMPANION_PROCESS: LazyLock<Mutex<(ChildStdin, ChildStdout)>> = LazyLock:
         format!("{LIBEXECDIR}/resources-processes")
     };
 
-    let mut additional_args: Vec<&str> = Vec::new();
-
-    match SETTINGS.memory_metric() {
-        MemoryMetric::ApproximatePss => additional_args.extend(&["--pss", "approximate"]),
-        MemoryMetric::Pss => additional_args.extend(&["--pss", "exact"]),
-        _ => {}
-    }
-
-    let child = if *IS_FLATPAK {
+    if *IS_FLATPAK {
         let runtime_path = FLATPAK_RUNTIME_PATH
             .as_ref()
             .expect("could not determine Flatpak runtime path");
@@ -58,10 +66,11 @@ static COMPANION_PROCESS: LazyLock<Mutex<(ChildStdin, ChildStdout)>> = LazyLock:
 
         debug!(
             "Spawning resources-processes in Flatpak mode via {ld_linux} ({proxy_path} {})",
-            additional_args.join(" ")
+            args.join(" ")
         );
 
-        Command::new(FLATPAK_SPAWN)
+        let mut command = Command::new(FLATPAK_SPAWN);
+        command
             .args([
                 "--host",
                 "env",
@@ -69,25 +78,34 @@ static COMPANION_PROCESS: LazyLock<Mutex<(ChildStdin, ChildStdout)>> = LazyLock:
                 ld_linux.as_str(),
                 proxy_path.as_str(),
             ])
-            .args(additional_args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
+            .args(args);
+        command
     } else {
         debug!(
             "Spawning resources-processes in native mode ({proxy_path} {})",
-            additional_args.join(" ")
+            args.join(" ")
         );
-        Command::new(proxy_path)
-            .args(additional_args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
+        let mut command = Command::new(proxy_path);
+        command.args(args);
+        command
+    }
+}
+
+static COMPANION_PROCESS: LazyLock<Mutex<(ChildStdin, ChildStdout)>> = LazyLock::new(|| {
+    let mut additional_args: Vec<&str> = Vec::new();
+
+    match SETTINGS.memory_metric() {
+        MemoryMetric::ApproximatePss => additional_args.extend(&["--pss", "approximate"]),
+        MemoryMetric::Pss => additional_args.extend(&["--pss", "exact"]),
+        _ => {}
+    }
+
+    let child = helper_command(&additional_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
 
     let stdin = child.stdin.unwrap();
     let stdout = child.stdout.unwrap();
